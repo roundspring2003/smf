@@ -102,11 +102,17 @@ func (p *Processor) ReportUsageAndUpdateQuota(smContext *smf_context.SMContext) 
 		p.updateGrantedQuota(smContext, rsp.MultipleUnitInformation)
 		// Usually only the anchor UPF need	to be updated
 		for _, urr := range smContext.UrrUpfMap {
-			upfId := smContext.ChargingInfo[urr.URRID].UpfId
-
-			if urr.State == smf_context.RULE_UPDATE {
-				upfUrrMap[upfId] = append(upfUrrMap[upfId], urr)
+			if urr.State != smf_context.RULE_UPDATE {
+				continue
 			}
+
+			chgInfo, ok := smContext.ChargingInfo[urr.URRID]
+			if !ok || chgInfo == nil {
+				logger.ChargingLog.Warnf("Skip non-charging URR[%d] in quota update flow", urr.URRID)
+				continue
+			}
+
+			upfUrrMap[chgInfo.UpfId] = append(upfUrrMap[chgInfo.UpfId], urr)
 		}
 
 		if len(upfUrrMap) == 0 {

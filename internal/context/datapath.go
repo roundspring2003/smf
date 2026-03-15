@@ -481,6 +481,7 @@ func (node DataPathNode) addUrrToNode(smContext *SMContext, urrId uint32, isMeas
 			logger.PduSessLog.Errorln("new URR failed")
 			return
 		}
+		smContext.UrrUpfMap[id] = urr
 	}
 
 	if urr != nil {
@@ -506,13 +507,16 @@ func (datapath *DataPath) addUrrToPath(smContext *SMContext) {
 
 		if curDataPathNode.IsANUPF() {
 			if curDataPathNode.Next() == nil {
+				//only one UPF in the path, which means this UPF is both AN and DN UPF, so use N3N6 URR
 				MBQEUrrId = smContext.UrrIdMap[N3N6_MBQE_URR]
 				MAQEUrrId = smContext.UrrIdMap[N3N6_MAQE_URR]
 			} else {
+				// this UPF is AN-UPF, so use N3N9 URR
 				MBQEUrrId = smContext.UrrIdMap[N3N9_MBQE_URR]
 				MAQEUrrId = smContext.UrrIdMap[N3N9_MAQE_URR]
 			}
 		} else {
+			// this UPF is DN-UPF, so use N9N6 URR
 			MBQEUrrId = smContext.UrrIdMap[N9N6_MBQE_URR]
 			MAQEUrrId = smContext.UrrIdMap[N9N6_MAQE_URR]
 		}
