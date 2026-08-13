@@ -334,16 +334,48 @@ func (t *Tls) validate() (bool, error) {
 }
 
 type PFCP struct {
-	ListenAddr   string `yaml:"listenAddr,omitempty" valid:"host,required"`
-	ExternalAddr string `yaml:"externalAddr,omitempty" valid:"host,required"`
-	NodeID       string `yaml:"nodeID,omitempty" valid:"host,required"`
+	ListenAddr          string `yaml:"listenAddr,omitempty" valid:"host,required"`
+	ExternalAddr        string `yaml:"externalAddr,omitempty" valid:"host,required"`
+	NodeID              string `yaml:"nodeID,omitempty" valid:"host,required"`
+	DispatchWorkerCount uint16 `yaml:"dispatchWorkerCount,omitempty" valid:"optional"`
 	// interval at which PFCP Association Setup error messages are output.
 	AssocFailAlertInterval time.Duration `yaml:"assocFailAlertInterval,omitempty" valid:"type(time.Duration),optional"`
 	AssocFailRetryInterval time.Duration `yaml:"assocFailRetryInterval,omitempty" valid:"type(time.Duration),optional"`
 	HeartbeatInterval      time.Duration `yaml:"heartbeatInterval,omitempty" valid:"type(time.Duration),optional"`
 }
 
+const (
+	PfcpDefaultRetransTimeout  = 3 * time.Second
+	PfcpDefaultMaxRetrans      = uint8(3)
+	PfcpDefaultDispatchWorkers = 64
+	PfcpMaximumDispatchWorkers = 1024
+)
+
+// GetPfcpRetransTimer returns the transport defaults used for PFCP requests.
+// Keeping the values behind Config allows a future configuration field to be
+// added without coupling the PFCP transaction implementation to constants.
+func (c *Config) GetPfcpRetransTimer() (time.Duration, uint8) {
+	return PfcpDefaultRetransTimeout, PfcpDefaultMaxRetrans
+}
+
+// GetPfcpDispatchWorkerCount returns the configured bounded PFCP request
+// concurrency. Zero means that the field was omitted and selects the default.
+func (c *Config) GetPfcpDispatchWorkerCount() int {
+	if c == nil || c.Configuration == nil || c.Configuration.PFCP == nil {
+		return PfcpDefaultDispatchWorkers
+	}
+	workers := int(c.Configuration.PFCP.DispatchWorkerCount)
+	if workers == 0 || workers > PfcpMaximumDispatchWorkers {
+		return PfcpDefaultDispatchWorkers
+	}
+	return workers
+}
+
 func (p *PFCP) validate() (bool, error) {
+	if p.DispatchWorkerCount > PfcpMaximumDispatchWorkers {
+		return false, fmt.Errorf("pfcp.dispatchWorkerCount must be between 1 and %d when set",
+			PfcpMaximumDispatchWorkers)
+	}
 	result, err := govalidator.ValidateStruct(p)
 	return result, appendInvalid(err)
 }
