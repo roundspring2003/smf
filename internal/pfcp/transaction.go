@@ -27,18 +27,19 @@ type TransmitMessage struct {
 type TxTransaction struct {
 	mu sync.Mutex
 
-	server         *PfcpServer
-	destAddr       *net.UDPAddr
-	seq            uint32
-	id             string
-	retransTimeout time.Duration
-	maxRetrans     uint8
-	req            message.Message
-	rspCh          chan RcvPfcpMsg
-	msgBuf         []byte
-	timer          *time.Timer
-	retransCount   uint8
-	done           bool
+	server          *PfcpServer
+	destAddr        *net.UDPAddr
+	seq             uint32
+	id              string
+	retransTimeout  time.Duration
+	maxRetrans      uint8
+	req             message.Message
+	rspCh           chan RcvPfcpMsg
+	msgBuf          []byte
+	timer           *time.Timer
+	timerGeneration uint64
+	retransCount    uint8
+	done            bool
 }
 
 type RxTransaction struct {
@@ -89,8 +90,12 @@ func (s *PfcpServer) newTxTransaction(
 }
 
 func (s *PfcpServer) deleteTxTransaction(tx *TxTransaction) {
-	s.txTrans.Delete(tx.id)
-	s.seqAlloc.Free(tx.seq)
+	// Only the transaction that is still registered under this key owns the
+	// sequence. A delayed callback must not delete a replacement or free the
+	// sequence while that replacement is using it.
+	if s.txTrans.CompareAndDelete(tx.id, tx) {
+		s.seqAlloc.Free(tx.seq)
+	}
 }
 
 func (tx *TxTransaction) send(request message.Message) error {
@@ -107,7 +112,7 @@ func (tx *TxTransaction) send(request message.Message) error {
 	}
 	tx.req = request
 	tx.msgBuf = packet
-	tx.timer = tx.startTimer()
+	tx.resetTimerLocked()
 	tx.mu.Unlock()
 
 	if _, err := tx.server.conn.WriteToUDP(packet, tx.destAddr); err != nil {
@@ -117,19 +122,18 @@ func (tx *TxTransaction) send(request message.Message) error {
 }
 
 func (tx *TxTransaction) complete(notification RcvPfcpMsg) {
-	tx.mu.Lock()
-	if tx.done {
-		tx.mu.Unlock()
-		return
-	}
-	tx.done = true
-	if tx.timer != nil {
-		tx.timer.Stop()
-		tx.timer = nil
-	}
-	response := tx.rspCh
-	tx.rspCh = nil
-	tx.mu.Unlock()
+	var response chan RcvPfcpMsg
+	func() {
+		tx.mu.Lock()
+		defer tx.mu.Unlock()
+		if tx.done {
+			return
+		}
+		tx.done = true
+		tx.invalidateTimerLocked()
+		response = tx.rspCh
+		tx.rspCh = nil
+	}()
 
 	tx.server.deleteTxTransaction(tx)
 	if response != nil {
@@ -138,52 +142,100 @@ func (tx *TxTransaction) complete(notification RcvPfcpMsg) {
 	}
 }
 
-func (tx *TxTransaction) handleTimeout() {
-	tx.mu.Lock()
-	if tx.done {
-		tx.mu.Unlock()
-		return
-	}
-	if tx.req == nil || tx.retransCount >= tx.maxRetrans {
-		tx.mu.Unlock()
+func (tx *TxTransaction) handleTimeout(generation uint64) {
+	var packet []byte
+	var destination *net.UDPAddr
+	var retransmission uint8
+	shouldComplete := false
+
+	func() {
+		tx.mu.Lock()
+		defer tx.mu.Unlock()
+		if tx.done || generation != tx.timerGeneration {
+			return
+		}
+		if tx.req == nil || tx.retransCount >= tx.maxRetrans {
+			shouldComplete = true
+			return
+		}
+
+		tx.retransCount++
+		retransmission = tx.retransCount
+		packet = append([]byte(nil), tx.msgBuf...)
+		destination = tx.destAddr
+		tx.resetTimerLocked()
+	}()
+
+	if shouldComplete {
 		tx.complete(RcvPfcpMsg{Msg: nil})
 		return
 	}
-
-	tx.retransCount++
-	packet := append([]byte(nil), tx.msgBuf...)
-	destination := tx.destAddr
-	tx.timer = tx.startTimer()
-	tx.mu.Unlock()
-
+	if len(packet) == 0 {
+		return
+	}
 	if _, err := tx.server.conn.WriteToUDP(packet, destination); err != nil {
-		tx.server.log.Errorf("retransmit PFCP request %q (#%d): %v", tx.id, tx.retransCount, err)
+		tx.server.log.Errorf("retransmit PFCP request %q (#%d): %v", tx.id, retransmission, err)
 	}
 }
 
-func (tx *TxTransaction) startTimer() *time.Timer {
-	return time.AfterFunc(tx.retransTimeout, func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				tx.server.log.Fatalf("panic in PFCP request timer: %v\n%s", recovered, debug.Stack())
-			}
-		}()
-		tx.server.transactionTimeout(TX, tx.id)
-	})
+// recoverTimerPanic contains a request timer failure within the transaction
+// that owns the callback. Aborting it also wakes the procedure waiting on rspCh.
+func (tx *TxTransaction) recoverTimerPanic(generation uint64) {
+	if recovered := recover(); recovered != nil {
+		tx.server.log.Errorf("panic in PFCP request timer transaction %q: %v\n%s",
+			tx.id, recovered, debug.Stack())
+		tx.abortTimerGeneration(generation)
+	}
 }
 
-func (s *PfcpServer) transactionTimeout(transactionType TransType, id string) {
-	if transactionType == TX {
-		tx, found := s.loadTxTransaction(id)
-		if !found {
+// abortTimerGeneration completes best-effort cleanup even if a panic happened
+// after done was partially updated. A stale callback cannot affect a reset or
+// replacement transaction.
+func (tx *TxTransaction) abortTimerGeneration(generation uint64) {
+	var response chan RcvPfcpMsg
+	shouldDelete := false
+	func() {
+		tx.mu.Lock()
+		defer tx.mu.Unlock()
+		if generation != tx.timerGeneration {
 			return
 		}
-		if isServerStopped(s.stopCh) {
+		tx.done = true
+		tx.invalidateTimerLocked()
+		response = tx.rspCh
+		tx.rspCh = nil
+		shouldDelete = true
+	}()
+
+	if !shouldDelete {
+		return
+	}
+	tx.server.deleteTxTransaction(tx)
+	if response != nil {
+		response <- RcvPfcpMsg{Msg: nil}
+		close(response)
+	}
+}
+
+func (tx *TxTransaction) invalidateTimerLocked() {
+	tx.timerGeneration++
+	if tx.timer != nil {
+		tx.timer.Stop()
+		tx.timer = nil
+	}
+}
+
+func (tx *TxTransaction) resetTimerLocked() {
+	tx.invalidateTimerLocked()
+	generation := tx.timerGeneration
+	tx.timer = time.AfterFunc(tx.retransTimeout, func() {
+		defer tx.recoverTimerPanic(generation)
+		if isServerStopped(tx.server.stopCh) {
 			tx.complete(RcvPfcpMsg{Msg: nil})
 			return
 		}
-		tx.handleTimeout()
-	}
+		tx.handleTimeout(generation)
+	})
 }
 
 func (s *PfcpServer) newRxTransaction(destination *net.UDPAddr, sequence uint32) *RxTransaction {
@@ -230,6 +282,28 @@ func (rx *RxTransaction) finishHandling() {
 	}
 	rx.handling = false
 	rx.resetTimerLocked()
+}
+
+// abortUnansweredAfterDispatchPanic removes a request whose dispatch path
+// panicked before caching a response. A cached response remains available for
+// duplicate requests even if later after-response work panics.
+func (rx *RxTransaction) abortUnansweredAfterDispatchPanic() bool {
+	shouldDelete := false
+	func() {
+		rx.mu.Lock()
+		defer rx.mu.Unlock()
+		if rx.done || len(rx.msgBuf) != 0 {
+			return
+		}
+		rx.done = true
+		rx.handling = false
+		rx.invalidateTimerLocked()
+		shouldDelete = true
+	}()
+	if shouldDelete {
+		rx.server.deleteRxTransaction(rx)
+	}
+	return shouldDelete
 }
 
 func (rx *RxTransaction) send(response message.Message) error {

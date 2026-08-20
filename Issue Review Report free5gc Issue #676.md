@@ -593,6 +593,8 @@ threshold bytes
 - dispatch queue 滿時立即停止並移除該 request 的 `RxTransaction`，避免留下只會等待 timer 的孤兒 transaction；UPF 之後重送時仍可重新 admission。
 - queue item 直接攜帶建立當下的 `RxTransaction`；worker 執行前必須 claim。若 queue 等待期間 timer 已到期，舊 item 只會被 dequeue 丟棄，不會誤綁後續相同 key 的 retransmission，也不會執行 stale handler。
 - claim 後暫停 Rx queue timer，避免長時間 handler 在處理途中被清除；response 送出後從該時間重設 duplicate-response cache timer。shutdown 仍可強制停止 transaction。
+- dispatcher 不再因單筆 handler panic 執行 `Fatalf`：response 前 panic 只 abort unanswered Rx transaction；response 後或 `afterResponse` panic 保留 cached response。worker 在 recovery 後繼續下一筆，不縮減固定 pool。
+- dispatcher 從 queue 取件後再次檢查 `stopCh`，避免 shutdown 與 queue 同時 ready 時開始新 handler。
 - 新增 concurrency regression test，使用阻塞 handler 證明同時執行數不超過 worker 數。
 - 新增 overflow 與 stale-queue regression tests，分別證明拒絕 dispatch 後 `rxTrans` 不殘留，以及逾時 queue item 不會進入 handler。
 

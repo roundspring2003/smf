@@ -231,8 +231,11 @@ go-pfcp 則以 `*ie.IE` 與 getter 表示協定欄位。
 - 保存原始 request 與 marshaled bytes。
 - 設定 retransmission timer。
 - timeout 時重送相同 bytes。
-- 到達最大次數後刪除 transaction 並回報 timeout。
-- 收到 response 時停止 timer、刪除 transaction、通知等待者。
+- 到達最大次數後刪除 transaction、釋放 sequence，並以 `Msg == nil` 通知等待者 timeout。
+- 收到 response 時停止 timer、刪除 transaction、釋放 sequence、通知等待者。
+- timer callback 綁定原 Tx object 並檢查 generation；stale callback 不得作用於 reset 或同 key replacement transaction。
+- timer callback panic 採 transaction-level recovery：記錄 error/stack、清除該 Tx、釋放 sequence，並以 timeout 通知解除 `RspCh` 等待；不終止整個 SMF。
+- Tx map cleanup 使用 object-aware `CompareAndDelete`，舊 callback 不得刪除 replacement 或錯誤釋放其 sequence。
 - 檢查 response type 是否與 request 對應。
 - Session message 檢查 SEID。
 
@@ -279,6 +282,8 @@ go-pfcp 則以 `*ie.IE` 與 getter 表示協定欄位。
 
 - [ ] listen address 與 port 如何設定。
 - [x] request dispatch 採固定大小 worker pool；handler 同步在 worker 內執行，不為每筆 request 建立 goroutine。
+- [x] dispatcher panic 採 request-level isolation，不再 `Fatalf` 終止 SMF；固定 worker recovery 後繼續下一筆工作。
+- [x] shutdown 在 channel select 後再次檢查 `stopCh`，避免 stop 與 queued request 同時 ready 時開始新 handler。
 
 Worker 數可在 PFCP config 設定；省略或設為 `0` 時使用預設 `64`，允許範圍為 `1..1024`：
 
@@ -298,8 +303,8 @@ configuration:
 - [x] transaction key 採 Saviah 作法：`RemoteIP-Sequence`，不包含 UDP port。
 - [ ] transaction map 是否需要 mutex，或只由單一 event loop存取。
 - [ ] retransmission timeout 與 max retransmission 來源。
-- [ ] response 到達後如何喚醒同步等待中的 sender。
-- [ ] timeout 如何回傳給 Association／Session procedure。
+- [x] response 到達後透過 Tx `RspCh` 喚醒同步等待中的 sender。
+- [x] timeout 或 Tx timer panic 以 `RcvPfcpMsg{Msg: nil}` 回傳，並關閉 `RspCh`。
 - [x] duplicate request 由 Rx transaction 重送 cached response，不重跑 handler。
 - [x] queued request timeout 後由 worker claim 失敗並略過，避免執行 stale handler。
 - [x] handler 執行期間暫停 Rx timer；response 後 reset cache timer；shutdown 強制 cleanup。
@@ -448,11 +453,15 @@ go test -race ./internal/pfcp/...
 - Sequence allocator。
 - Tx/Rx transaction lifecycle。
 - Timeout/retry/cleanup。
+- Tx/Rx timer panic 只清除所屬 transaction；stale generation/replacement 不受影響。
 - Duplicate request。
 - Dispatch concurrency 不超過 worker 上限。
 - Dispatch queue overflow 會釋放未接納的 Rx transaction。
 - Dispatch queue 內已逾時的 request 不會執行 handler。
 - 已被 worker claim 的 request 即使 handler 慢於 queue timeout，transaction 仍維持有效。
+- handler 在 response 前 panic 時只 abort unanswered Rx transaction，且單一 fixed worker 仍可處理下一筆 request。
+- response 後／`afterResponse` panic 時保留 duplicate-response cache，不重跑 handler。
+- stopCh 關閉後不再開始 queued handler。
 - malformed packet 與 missing IE。
 
 ### 9.2 Integration test
