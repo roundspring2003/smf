@@ -26,7 +26,9 @@ var testConfig = factory.Config{
 			Port:         8000,
 		},
 		PFCP: &factory.PFCP{
-			NodeID: "10.4.0.1",
+			ListenAddr:   "127.0.0.1",
+			ExternalAddr: "10.4.0.1",
+			NodeID:       "10.4.0.1",
 		},
 	},
 }
@@ -193,6 +195,33 @@ func TestBuildPfcpSessionEstablishmentRequest(t *testing.T) {
 }
 
 // hsien
+func TestBuildSessionEstablishmentRequestUsesGoPFCP(t *testing.T) {
+	initSmfContext()
+	smctx := context.NewSMContext("imsi-208930000000099", 10)
+	const localSEID uint64 = 99
+	smctx.PFCPContext["10.4.0.1"] = &context.PFCPSessionContext{LocalSEID: localSEID}
+
+	req, err := message.BuildSessionEstablishmentRequest(
+		*testNodeID, "10.4.0.1", "test-uuid", smctx, nil, nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildSessionEstablishmentRequest() error: %v", err)
+	}
+	if req.NodeID == nil || req.CPFSEID == nil || req.PDNType == nil {
+		t.Fatalf("go-pfcp request is missing mandatory IE(s): %+v", req)
+	}
+	if req.Sequence() != 0 {
+		t.Fatalf("initial sequence = %d, want transaction-assigned placeholder 0", req.Sequence())
+	}
+	fseid, err := req.CPFSEID.FSEID()
+	if err != nil {
+		t.Fatalf("decode CP F-SEID: %v", err)
+	}
+	if fseid.SEID != localSEID {
+		t.Fatalf("CP F-SEID = %d, want %d", fseid.SEID, localSEID)
+	}
+}
+
 func TestBuildPfcpSessionEstablishmentResponse(t *testing.T) {
 	initSmfContext()
 	rsp, err := message.BuildPfcpSessionEstablishmentResponse()

@@ -311,6 +311,33 @@ func sendToRcvCh(
 	}
 }
 
+// SendRequest sends one concrete go-pfcp request through the server-owned
+// transaction layer. It is also the migration boundary for procedures whose IE
+// builders/handlers still use free5gc/pfcp while production UDP already uses
+// PfcpServer.
+func (s *PfcpServer) SendRequest(request message.Message, addr *net.UDPAddr) (message.Message, error) {
+	if s == nil || request == nil || !request.IsRequest() {
+		return nil, fmt.Errorf("send PFCP request: invalid request")
+	}
+	responseChannel := s.SendPfcpMsg(request, addr)
+	if responseChannel == nil {
+		return nil, fmt.Errorf("send PFCP request to %v: PFCP server is stopped", addr)
+	}
+
+	select {
+	case <-s.stopCh:
+		return nil, fmt.Errorf("send PFCP request to %v: PFCP server is stopped", addr)
+	case received, ok := <-responseChannel:
+		if !ok || received.Msg == nil {
+			if isServerStopped(s.stopCh) {
+				return nil, fmt.Errorf("send PFCP request to %v: PFCP server is stopped", addr)
+			}
+			return nil, fmt.Errorf("PFCP request to %v timed out", addr)
+		}
+		return received.Msg, nil
+	}
+}
+
 func (s *PfcpServer) SendPfcpMsg(msg message.Message, addr *net.UDPAddr) chan RcvPfcpMsg {
 	if s == nil || msg == nil || addr == nil {
 		return nil

@@ -316,7 +316,7 @@ func (p *Processor) HandlePDUSessionSMContextCreate(
 			p.EstHandler(isDone, smContext, success)
 		}
 
-		ActivateUPFSession(smContext, handler)
+		p.ActivateUPFSession(smContext, handler)
 
 		smContext.SendUpPathChgNotification("LATE", SendUpPathChgEventExposureNotification)
 

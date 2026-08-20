@@ -209,6 +209,9 @@ go-pfcp 則以 `*ie.IE` 與 getter 表示協定欄位。
 - 記錄 recovery/start time。
 - 支援 context cancellation 與 graceful close。
 - close 後 pending transaction 必須解除等待。
+- [x] Production startup 已改為只建立一個新 `PfcpServer`；不再呼叫 legacy `udp.Run()`，也不再用固定 sleep 等待 socket。
+- [x] `Run()`／bind 失敗會回傳到 `SmfApp.Start()` 並觸發 shutdown，避免 SBI 存活但 N4 不可用。
+- [x] Shutdown 先取消 PFCP parent context，再 `Stop()` server 並等待 main／receiver／bounded workers 全部結束。
 
 ### 5.2 Receive path
 
@@ -402,6 +405,9 @@ configuration:
 - [x] 被動方向：新 dispatcher 接收 go-pfcp `HeartbeatRequest`，由 handler 回覆 `HeartbeatResponse`。
 - [x] 被動方向：驗證 response 沿用 request sequence，並攜帶 SMF Recovery Time Stamp。
 - [x] 主動方向 foundation：SMF Heartbeat Request sender、transaction response matching，以及 concrete response/Recovery Time Stamp validation。
+- [x] Processor 主動 Heartbeat 狀態機改由可注入的 `ActivePFCPClient` 呼叫 go-pfcp sender；送出失敗會取消 association 並清除 timestamp。
+- [x] Recovery Time Stamp 相同時維持 association；第一次回覆建立 baseline；較新的 timestamp 視為 UPF restart，進入既有 session cleanup／重新 association 流程。
+- [x] unit/race test 覆蓋正常回覆、timeout、第一次 baseline 與 UPF restart。
 - [ ] 使用實際 UPF 驗證 Heartbeat timeout、retry 與 Recovery Time Stamp 變更行為。
 
 ### Phase 3：Association
@@ -410,16 +416,25 @@ configuration:
 - [x] 主動方向 foundation：Association Setup／Release send、transaction matching 與 concrete response/Cause validation。
 - [x] Node ID 的 IPv4／IPv6／FQDN IE ↔ `pfcptype.NodeID` 轉換。
 - [x] `AssociationStateManager` 注入介面與 response 寫出後才執行的 `afterResponse` hook。
-- [ ] Runtime wiring：由 startup 上層注入 adapter，將 setup/release 寫入現有 `context.UPF` association state。
+- [x] Processor 主動 Association Setup orchestration 改由 `ActivePFCPClient` 呼叫新 sender，成功後記錄 UPF Recovery Time Stamp 並建立 child `AssociationContext`。
+- [x] Setup retry 可被 SMF PFCP parent context 中止，且不會在取消後錯誤進入 Heartbeat。
+- [x] Runtime wiring：startup 將同一個 `PfcpServer` 注入 Processor active client 與 passive `AssociationStateManager`；configured UPF 才接受 Setup，Release 取消 association 但不刪除 topology。
 - [ ] UPF restart recovery：實作/確認 Saviah `afterResponse` 對應的 session recovery 行為。
 - [ ] 使用實際 go-upf 驗證雙向 Association Setup／Release。
 
 ### Phase 4：Session basic procedures
 
-- 先遷移 Session Deletion。
-- 再遷移 Session Establishment。
-- 最後遷移 Session Modification。
-- 每個 procedure 分別測試 Cause、SEID、CreatedPDR 與 F-SEID。
+- [x] Production UDP/transaction 已切到新 `PfcpServer`。尚未重寫的 Session procedure 經 legacy wire bridge：legacy struct marshal → go-pfcp parse → 新 TxTransaction；response 反向轉回既有 Processor 所需型別。
+- [x] 被動 Session Report 等未遷移 handler 由新 bounded dispatcher 同步橋接，不再由 legacy server 每筆建立無上限 dispatch goroutine。
+- [x] Session Establishment sender 已直接使用 concrete `*message.SessionEstablishmentRequest`／`*message.SessionEstablishmentResponse` 與新 `PfcpServer` transaction；Processor 不再接收 legacy `pfcpUdp.Message`。
+- [x] Establishment response 驗證 response type、local SEID、Node ID、Cause，以及 accepted response 必須包含可解析的 UP F-SEID。
+- [x] accepted response 將 UP F-SEID 寫入 `RemoteSEID`，並解析 Created PDR；若 UPF 配置 F-TEID，依 PDR ID 回填 `PDI.LocalFTeid`。
+- [x] 現階段為降低 rule mapping 回歸風險，Create PDR/FAR/QER/URR/BAR 仍沿用既有 builder 後做 wire round trip，server/transaction/response 已完全是 go-pfcp。下一步逐項以 `ie.NewXXX` 取代此 builder 內部轉換。
+- [ ] 遷移 Session Deletion。
+- [ ] 將 Session Establishment rule builder 改成直接建立 go-pfcp grouped IE，移除內部 legacy body conversion。
+- [ ] 遷移 Session Modification。
+- [x] Session Establishment unit test 已涵蓋 accepted/rejected Cause、SEID mismatch、缺少 UP F-SEID、builder round trip 與 Created PDR/F-TEID。
+- [ ] 使用實際 UPF 驗證 Session Establishment wire compatibility。
 
 ### Phase 5：Session Report 與 Charging
 
@@ -500,8 +515,8 @@ go test -race ./internal/pfcp/...
 - [ ] Heartbeat、Association、Session Establishment、Modification、Deletion、Report 全部通過。
 - [x] Timeout、retry、duplicate request 與 bounded dispatch 行為有 foundation unit test。
 - [ ] malformed packet 與 missing mandatory IE 不會造成 panic。
-- [ ] `go test ./...` 通過。
-- [ ] `go test -race ./internal/pfcp/...` 通過。
+- [x] `go test ./...` 通過。
+- [x] `go test -race ./...` 通過。
 - [ ] 與實際 go-upf 的端對端測試通過。
 
 ---

@@ -1,6 +1,7 @@
 package message
 
 import (
+	"fmt"
 	"net"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/free5gc/pfcp/pfcpType"
 	"github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/pfcp/udp"
+	goPfcpMessage "github.com/wmnsk/go-pfcp/message"
 )
 
 func BuildPfcpAssociationSetupRequest() (pfcp.PFCPAssociationSetupRequest, error) {
@@ -386,16 +388,24 @@ func BuildPfcpSessionEstablishmentRequest(
 
 	msg.NodeID = &context.GetSelf().CPNodeID
 
-	isv4 := context.GetSelf().ExternalIP().To4() != nil
+	cpAddress := context.GetSelf().ExternalIP()
+	if cpAddress == nil {
+		return msg, fmt.Errorf("SMF PFCP external address is not configured")
+	}
+	cpIPv4 := cpAddress.To4()
 	nodeIDtoIP := upNodeID.ResolveNodeIdToIp().String()
 
 	localSEID := smContext.PFCPContext[nodeIDtoIP].LocalSEID
 
 	msg.CPFSEID = &pfcpType.FSEID{
-		V4:          isv4,
-		V6:          !isv4,
-		Seid:        localSEID,
-		Ipv4Address: context.GetSelf().ExternalIP().To4(),
+		V4:   cpIPv4 != nil,
+		V6:   cpIPv4 == nil,
+		Seid: localSEID,
+	}
+	if cpIPv4 != nil {
+		msg.CPFSEID.Ipv4Address = cpIPv4
+	} else {
+		msg.CPFSEID.Ipv6Address = cpAddress.To16()
 	}
 
 	msg.CreatePDR = make([]*pfcp.CreatePDR, 0)
@@ -460,6 +470,59 @@ func BuildPfcpSessionEstablishmentRequest(
 	// }
 
 	return msg, nil
+}
+
+// BuildSessionEstablishmentRequest preserves the existing SMF rule-to-IE
+// mapping while moving the procedure boundary to go-pfcp. The legacy body is
+// encoded and immediately decoded as a concrete go-pfcp message; no legacy
+// message reaches the new server or its transaction layer.
+//
+// Sequence 0 is intentional. TxTransaction assigns the final 24-bit sequence
+// immediately before marshaling and sending the request.
+func BuildSessionEstablishmentRequest(
+	upNodeID pfcpType.NodeID,
+	upN4Addr string,
+	upfUUID string,
+	smContext *context.SMContext,
+	pdrList []*context.PDR,
+	farList []*context.FAR,
+	barList []*context.BAR,
+	qerList []*context.QER,
+	urrList []*context.URR,
+) (*goPfcpMessage.SessionEstablishmentRequest, error) {
+	body, err := BuildPfcpSessionEstablishmentRequest(
+		upNodeID, upN4Addr, upfUUID, smContext,
+		pdrList, farList, barList, qerList, urrList,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	legacyMessage := &pfcp.Message{
+		Header: pfcp.Header{
+			Version:         pfcp.PfcpVersion,
+			MP:              1,
+			S:               pfcp.SEID_PRESENT,
+			MessageType:     pfcp.PFCP_SESSION_ESTABLISHMENT_REQUEST,
+			SEID:            0,
+			SequenceNumber:  0,
+			MessagePriority: 0,
+		},
+		Body: body,
+	}
+	wire, err := legacyMessage.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("encode PFCP Session Establishment Request: %w", err)
+	}
+	parsed, err := goPfcpMessage.Parse(wire)
+	if err != nil {
+		return nil, fmt.Errorf("decode PFCP Session Establishment Request with go-pfcp: %w", err)
+	}
+	request, ok := parsed.(*goPfcpMessage.SessionEstablishmentRequest)
+	if !ok {
+		return nil, fmt.Errorf("decoded PFCP Session Establishment Request as %T", parsed)
+	}
+	return request, nil
 }
 
 func BuildPfcpSessionEstablishmentResponse() (pfcp.PFCPSessionEstablishmentResponse, error) {

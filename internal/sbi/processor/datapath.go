@@ -2,6 +2,7 @@ package processor
 
 import (
 	"fmt"
+	"net"
 
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/mediatype/multipart"
@@ -12,6 +13,8 @@ import (
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
 	pfcp_message "github.com/free5gc/smf/internal/pfcp/message"
+	"github.com/wmnsk/go-pfcp/ie"
+	goPfcpMessage "github.com/wmnsk/go-pfcp/message"
 )
 
 type PFCPState struct {
@@ -23,6 +26,12 @@ type PFCPState struct {
 	urrList []*smf_context.URR
 }
 
+type SessionEstablishmentPFCPClient interface {
+	SendSessionEstablishmentRequest(
+		*goPfcpMessage.SessionEstablishmentRequest, *net.UDPAddr, uint64,
+	) (*goPfcpMessage.SessionEstablishmentResponse, error)
+}
+
 type SendPfcpResult struct {
 	Status smf_context.PFCPSessionResponseStatus
 	RcvMsg *pfcpUdp.Message
@@ -32,7 +41,7 @@ type SendPfcpResult struct {
 // ActivateUPFSession send all datapaths to UPFs and send result to UE
 // It returns after all PFCP response have been returned or timed out,
 // and before sending N1N2MessageTransfer request if it is needed.
-func ActivateUPFSession(
+func (p *Processor) ActivateUPFSession(
 	smContext *smf_context.SMContext,
 	notifyUeHander func(*smf_context.SMContext, bool),
 ) {
@@ -98,7 +107,7 @@ func ActivateUPFSession(
 			"%d URRs (aggregated IDs: %v)", ip, len(pfcp.pdrList), len(pfcp.farList), len(pfcp.urrList), urrIds)
 		sessionContext, exist := smContext.PFCPContext[ip]
 		if !exist || sessionContext.RemoteSEID == 0 {
-			go establishPfcpSession(smContext, pfcp, resChan)
+			go p.establishPfcpSession(smContext, pfcp, resChan)
 		} else {
 			go modifyExistingPfcpSession(smContext, pfcp, resChan, "")
 		}
@@ -130,59 +139,166 @@ func QueryReport(smContext *smf_context.SMContext, upf *smf_context.UPF,
 	}
 }
 
-func establishPfcpSession(smContext *smf_context.SMContext,
+func (p *Processor) establishPfcpSession(
+	smContext *smf_context.SMContext,
 	state *PFCPState,
 	resCh chan<- SendPfcpResult,
 ) {
 	logger.PduSessLog.Infoln("Sending PFCP Session Establishment Request")
 
-	rcvMsg, err := pfcp_message.SendPfcpSessionEstablishmentRequest(
-		state.upf, smContext, state.pdrList, state.farList, state.barList, state.qerList, state.urrList)
-	if err != nil {
-		logger.PduSessLog.Warnf("Sending PFCP Session Establishment Request error: %+v", err)
+	fail := func(err error) {
+		logger.PduSessLog.Warnf("PFCP Session Establishment failed: %+v", err)
 		resCh <- SendPfcpResult{
 			Status: smf_context.SessionEstablishFailed,
 			Err:    err,
 		}
+	}
+	if state == nil || state.upf == nil {
+		fail(fmt.Errorf("PFCP Session Establishment has no target UPF"))
+		return
+	}
+	if err := state.upf.IsAssociated(); err != nil {
+		fail(err)
 		return
 	}
 
-	rsp := rcvMsg.PfcpMessage.Body.(pfcp.PFCPSessionEstablishmentResponse)
-	if rsp.Cause == nil {
-		logger.PduSessLog.Errorf("PFCP Session Establishment Response missing Cause")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionEstablishFailed,
-			Err:    fmt.Errorf("missing Cause in PFCP Session Establishment Response"),
-		}
+	nodeIP := state.upf.NodeID.ResolveNodeIdToIp()
+	nodeIPString := nodeIP.String()
+	sessionContext, exists := smContext.PFCPContext[nodeIPString]
+	if !exists || sessionContext == nil {
+		fail(fmt.Errorf("PFCP session context for UPF %s does not exist", nodeIPString))
 		return
-	}
-	if rsp.NodeID == nil {
-		logger.PduSessLog.Errorf("PFCP Session Establishment Response missing NodeID")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionEstablishFailed,
-			Err:    fmt.Errorf("missing NodeID in PFCP Session Establishment Response"),
-		}
-		return
-	}
-	if rsp.UPFSEID != nil {
-		NodeIDtoIP := rsp.NodeID.ResolveNodeIdToIp().String()
-		pfcpSessionCtx := smContext.PFCPContext[NodeIDtoIP]
-		pfcpSessionCtx.RemoteSEID = rsp.UPFSEID.Seid
 	}
 
-	if rsp.Cause.CauseValue == pfcpType.CauseRequestAccepted {
-		logger.PduSessLog.Infoln("Received PFCP Session Establishment Accepted Response")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionEstablishSuccess,
-			RcvMsg: rcvMsg,
-		}
-	} else {
-		logger.PduSessLog.Infoln("Received PFCP Session Establishment Not Accepted Response")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionEstablishFailed,
-			Err:    fmt.Errorf("cause[%d] if not request accepted", rsp.Cause.CauseValue),
+	request, err := pfcp_message.BuildSessionEstablishmentRequest(
+		state.upf.NodeID, nodeIPString, state.upf.UUID(), smContext,
+		state.pdrList, state.farList, state.barList, state.qerList, state.urrList,
+	)
+	if err != nil {
+		fail(fmt.Errorf("build PFCP Session Establishment Request: %w", err))
+		return
+	}
+
+	client, ok := p.getActivePFCPClient().(SessionEstablishmentPFCPClient)
+	if !ok {
+		fail(fmt.Errorf("go-pfcp Session Establishment client is not configured"))
+		return
+	}
+	response, err := client.SendSessionEstablishmentRequest(
+		request,
+		&net.UDPAddr{IP: nodeIP, Port: pfcpPeerPort},
+		sessionContext.LocalSEID,
+	)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if response == nil {
+		fail(fmt.Errorf("PFCP Session Establishment client returned a nil response"))
+		return
+	}
+	if response.Cause == nil {
+		fail(fmt.Errorf("PFCP Session Establishment Response is missing Cause"))
+		return
+	}
+
+	cause, err := response.Cause.Cause()
+	if err != nil {
+		fail(fmt.Errorf("decode PFCP Session Establishment Cause: %w", err))
+		return
+	}
+	if cause != ie.CauseRequestAccepted {
+		fail(fmt.Errorf("PFCP Session Establishment rejected with Cause %d", cause))
+		return
+	}
+
+	if response.UPFSEID == nil {
+		fail(fmt.Errorf("accepted PFCP Session Establishment Response is missing UP F-SEID"))
+		return
+	}
+	upfFSEID, err := response.UPFSEID.FSEID()
+	if err != nil {
+		fail(fmt.Errorf("decode PFCP Session Establishment UP F-SEID: %w", err))
+		return
+	}
+	// Store the UPF SEID as soon as an accepted response identifies the remote
+	// session. If a Created PDR is malformed, later cleanup still knows which
+	// remote session must be deleted.
+	sessionContext.RemoteSEID = upfFSEID.SEID
+	if err = applyCreatedPDRs(response.CreatedPDR, sessionContext, state.pdrList); err != nil {
+		fail(err)
+		return
+	}
+
+	logger.PduSessLog.Infoln("Received PFCP Session Establishment Accepted Response")
+	resCh <- SendPfcpResult{Status: smf_context.SessionEstablishSuccess}
+}
+
+func applyCreatedPDRs(
+	createdPDRs []*ie.IE,
+	sessionContext *smf_context.PFCPSessionContext,
+	requestedPDRs []*smf_context.PDR,
+) error {
+	pdrByID := make(map[uint16]*smf_context.PDR, len(requestedPDRs)+len(sessionContext.PDRs))
+	for id, pdr := range sessionContext.PDRs {
+		pdrByID[id] = pdr
+	}
+	for _, pdr := range requestedPDRs {
+		if pdr != nil {
+			pdrByID[pdr.PDRID] = pdr
 		}
 	}
+
+	for _, createdPDR := range createdPDRs {
+		if createdPDR == nil {
+			return fmt.Errorf("PFCP Session Establishment Response contains a nil Created PDR")
+		}
+		children, err := createdPDR.CreatedPDR()
+		if err != nil {
+			return fmt.Errorf("decode Created PDR: %w", err)
+		}
+		var pdrIDIE, fteidIE *ie.IE
+		for _, child := range children {
+			switch child.Type {
+			case ie.PDRID:
+				pdrIDIE = child
+			case ie.FTEID:
+				fteidIE = child
+			}
+		}
+		if pdrIDIE == nil {
+			return fmt.Errorf("Created PDR is missing PDR ID")
+		}
+		pdrID, err := pdrIDIE.PDRID()
+		if err != nil {
+			return fmt.Errorf("decode Created PDR ID: %w", err)
+		}
+		// F-TEID is present only when the UPF allocated it (for example, when
+		// the Create PDR requested CH=1). A Created PDR without F-TEID needs no
+		// local rule update.
+		if fteidIE == nil {
+			continue
+		}
+		fteid, err := fteidIE.FTEID()
+		if err != nil {
+			return fmt.Errorf("decode F-TEID for Created PDR %d: %w", pdrID, err)
+		}
+		pdr := pdrByID[pdrID]
+		if pdr == nil {
+			return fmt.Errorf("Created PDR refers to unknown PDR ID %d", pdrID)
+		}
+		pdr.PDI.LocalFTeid = &pfcpType.FTEID{
+			Chid:        fteid.HasChID(),
+			Ch:          fteid.HasCh(),
+			V4:          fteid.HasIPv4(),
+			V6:          fteid.HasIPv6(),
+			Teid:        fteid.TEID,
+			Ipv4Address: append(net.IP(nil), fteid.IPv4Address...),
+			Ipv6Address: append(net.IP(nil), fteid.IPv6Address...),
+			ChooseId:    fteid.ChooseID,
+		}
+	}
+	return nil
 }
 
 func modifyExistingPfcpSession(

@@ -3,162 +3,257 @@ package processor
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/mediatype/multipart"
 	"github.com/free5gc/openapi/models"
-	"github.com/free5gc/pfcp"
+	legacyPfcp "github.com/free5gc/pfcp"
 	"github.com/free5gc/pfcp/pfcpType"
+	"github.com/wmnsk/go-pfcp/message"
+
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
-	"github.com/free5gc/smf/internal/pfcp/message"
+	legacyMessage "github.com/free5gc/smf/internal/pfcp/message"
 )
 
-func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *smf_context.UPF) {
-	var upfStr string
-	if upf.NodeID.NodeIdType == pfcpType.NodeIdTypeFqdn {
-		upfStr = fmt.Sprintf("[%s](%s)", upf.NodeID.FQDN, upf.NodeID.ResolveNodeIdToIp().String())
-	} else {
-		upfStr = fmt.Sprintf("[%s]", upf.NodeID.ResolveNodeIdToIp().String())
-	}
+const pfcpPeerPort = 8805
 
+// ActivePFCPClient is the active node-level PFCP transport needed by the
+// association state machine. *pfcp.PfcpServer satisfies this interface without
+// making processor import internal/pfcp and creating an import cycle.
+type ActivePFCPClient interface {
+	SendAssociationSetupRequest(*net.UDPAddr) (*message.AssociationSetupResponse, error)
+	SendHeartbeatRequest(*net.UDPAddr) (*message.HeartbeatResponse, error)
+}
+
+func (p *Processor) SetActivePFCPClient(client ActivePFCPClient) {
+	p.activePFCPMu.Lock()
+	p.activePFCPClient = client
+	p.activePFCPMu.Unlock()
+}
+
+func (p *Processor) getActivePFCPClient() ActivePFCPClient {
+	p.activePFCPMu.RLock()
+	defer p.activePFCPMu.RUnlock()
+	return p.activePFCPClient
+}
+
+func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *smf_context.UPF) {
+	upfStr := formatUPF(upf)
 	for {
-		// check if SMF PFCP context (parent) was canceled
-		// note: UPF AssociationContexts are children of smfPfcpContext
 		select {
 		case <-smfPfcpContext.Done():
 			logger.MainLog.Infoln("Canceled SMF PFCP context")
 			return
 		default:
-			ensureSetupPfcpAssociation(smfPfcpContext, upf, upfStr)
-			if smf_context.GetSelf().PfcpHeartbeatInterval == 0 {
-				return
-			}
-			keepHeartbeatTo(upf, upfStr)
-			// returns when UPF heartbeat loss is detected or association is canceled
-
-			p.releaseAllResourcesOfUPF(upf, upfStr)
 		}
+
+		if !p.ensureSetupPfcpAssociation(smfPfcpContext, upf, upfStr) {
+			return
+		}
+		if smf_context.GetSelf().PfcpHeartbeatInterval == 0 {
+			return
+		}
+		if err := p.keepHeartbeatTo(upf, upfStr); err != nil {
+			logger.MainLog.Errorf("PFCP Heartbeat error: %v", err)
+		}
+
+		// Heartbeat loss, a changed Recovery Time Stamp, or external
+		// association cancellation invalidates every PFCP session on this UPF.
+		p.releaseAllResourcesOfUPF(upf, upfStr)
 	}
+}
+
+func formatUPF(upf *smf_context.UPF) string {
+	if upf.NodeID.NodeIdType == pfcpType.NodeIdTypeFqdn {
+		return fmt.Sprintf("[%s](%s)", upf.NodeID.FQDN, upf.NodeID.ResolveNodeIdToIp().String())
+	}
+	return fmt.Sprintf("[%s]", upf.NodeID.ResolveNodeIdToIp().String())
 }
 
 func (p *Processor) ReleaseAllResourcesOfUPF(upf *smf_context.UPF) {
-	var upfStr string
-	if upf.NodeID.NodeIdType == pfcpType.NodeIdTypeFqdn {
-		upfStr = fmt.Sprintf("[%s](%s)", upf.NodeID.FQDN, upf.NodeID.ResolveNodeIdToIp().String())
-	} else {
-		upfStr = fmt.Sprintf("[%s]", upf.NodeID.ResolveNodeIdToIp().String())
-	}
-	p.releaseAllResourcesOfUPF(upf, upfStr)
+	p.releaseAllResourcesOfUPF(upf, formatUPF(upf))
 }
 
-func ensureSetupPfcpAssociation(parentContext context.Context, upf *smf_context.UPF, upfStr string) {
+func (p *Processor) ensureSetupPfcpAssociation(
+	parentContext context.Context,
+	upf *smf_context.UPF,
+	upfStr string,
+) bool {
 	alertTime := time.Now()
 	alertInterval := smf_context.GetSelf().AssocFailAlertInterval
 	retryInterval := smf_context.GetSelf().AssocFailRetryInterval
+
 	for {
-		err := setupPfcpAssociation(upf, upfStr)
-		if err == nil {
-			// success
-			// assign UPF an AssociationContext, with SMF PFCP Context as parent
-			upf.AssociationContext, upf.CancelAssociation = context.WithCancel(parentContext)
-			return
-		}
-		logger.MainLog.Warnf("Failed to setup an association with UPF[%s], error:%+v", upfStr, err)
-		now := time.Now()
-		logger.MainLog.Debugf("now %+v, alertTime %+v", now, alertTime)
-		if now.After(alertTime.Add(alertInterval)) {
-			logger.MainLog.Errorf("ALERT for UPF[%s]", upfStr)
-			alertTime = now
-		}
-		logger.MainLog.Debugf("Wait %+v until next retry attempt", retryInterval)
-		timer := time.After(retryInterval)
-		select { // no default case, either case needs to be true to continue
+		select {
 		case <-parentContext.Done():
 			logger.MainLog.Infoln("Canceled SMF PFCP context")
-			return
-		case <-timer:
-			continue
+			return false
+		default:
+		}
+
+		if err := p.setupPfcpAssociation(upf, upfStr); err == nil {
+			upf.AssociationContext, upf.CancelAssociation = context.WithCancel(parentContext)
+			return true
+		} else {
+			logger.MainLog.Warnf("Failed to setup an association with UPF[%s], error:%+v", upfStr, err)
+			now := time.Now()
+			if now.After(alertTime.Add(alertInterval)) {
+				logger.MainLog.Errorf("ALERT for UPF[%s]", upfStr)
+				alertTime = now
+			}
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-parentContext.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			logger.MainLog.Infoln("Canceled SMF PFCP context")
+			return false
+		case <-timer.C:
 		}
 	}
 }
 
-func setupPfcpAssociation(upf *smf_context.UPF, upfStr string) error {
+func (p *Processor) setupPfcpAssociation(upf *smf_context.UPF, upfStr string) error {
 	logger.MainLog.Infof("Sending PFCP Association Request to UPF%s", upfStr)
 
-	resMsg, err := message.SendPfcpAssociationSetupRequest(upf.NodeID)
+	client := p.getActivePFCPClient()
+	if client == nil {
+		return setupPfcpAssociationLegacy(upf, upfStr)
+	}
+
+	response, err := client.SendAssociationSetupRequest(&net.UDPAddr{
+		IP:   upf.NodeID.ResolveNodeIdToIp(),
+		Port: pfcpPeerPort,
+	})
 	if err != nil {
 		return err
 	}
+	if response == nil || response.RecoveryTimeStamp == nil {
+		return fmt.Errorf("PFCP Association Setup Response from UPF%s is missing Recovery Time Stamp", upfStr)
+	}
+	recoveryTime, err := response.RecoveryTimeStamp.RecoveryTimeStamp()
+	if err != nil {
+		return fmt.Errorf("decode PFCP Association Setup Recovery Time Stamp from UPF%s: %w", upfStr, err)
+	}
+	upf.RecoveryTimeStamp = recoveryTime
 
-	rsp := resMsg.PfcpMessage.Body.(pfcp.PFCPAssociationSetupResponse)
+	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
+	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
+	return nil
+}
 
-	if rsp.Cause == nil || rsp.Cause.CauseValue != pfcpType.CauseRequestAccepted {
+func setupPfcpAssociationLegacy(upf *smf_context.UPF, upfStr string) error {
+	responseMessage, err := legacyMessage.SendPfcpAssociationSetupRequest(upf.NodeID)
+	if err != nil {
+		return err
+	}
+	response := responseMessage.PfcpMessage.Body.(legacyPfcp.PFCPAssociationSetupResponse)
+	if response.Cause == nil || response.Cause.CauseValue != pfcpType.CauseRequestAccepted {
 		return fmt.Errorf("received PFCP Association Setup Not Accepted Response from UPF%s", upfStr)
 	}
-
-	nodeID := rsp.NodeID
-	if nodeID == nil {
+	if response.NodeID == nil {
 		return fmt.Errorf("pfcp association needs NodeID")
 	}
 
 	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
 	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
-
 	return nil
 }
 
-func keepHeartbeatTo(upf *smf_context.UPF, upfStr string) {
+func (p *Processor) keepHeartbeatTo(upf *smf_context.UPF, upfStr string) error {
 	for {
-		err := doPfcpHeartbeat(upf, upfStr)
-		if err != nil {
-			logger.MainLog.Errorf("PFCP Heartbeat error: %v", err)
-			return
+		if err := p.doPfcpHeartbeat(upf, upfStr); err != nil {
+			return err
 		}
 
-		timer := time.After(smf_context.GetSelf().PfcpHeartbeatInterval)
+		timer := time.NewTimer(smf_context.GetSelf().PfcpHeartbeatInterval)
 		select {
 		case <-upf.AssociationContext.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			logger.MainLog.Infof("Canceled association to UPF[%s]", upfStr)
-			return
-		case <-timer:
-			continue
+			return nil
+		case <-timer.C:
 		}
 	}
 }
 
-func doPfcpHeartbeat(upf *smf_context.UPF, upfStr string) error {
+func (p *Processor) doPfcpHeartbeat(upf *smf_context.UPF, upfStr string) error {
 	if err := upf.IsAssociated(); err != nil {
 		return fmt.Errorf("cancel heartbeat: %+v", err)
 	}
 
 	logger.MainLog.Debugf("Sending PFCP Heartbeat Request to UPF%s", upfStr)
-
-	resMsg, err := message.SendPfcpHeartbeatRequest(upf)
-	if err != nil {
-		upf.CancelAssociation()
-		upf.RecoveryTimeStamp = time.Time{}
-		return fmt.Errorf("SendPfcpHeartbeatRequest error: %w", err)
+	client := p.getActivePFCPClient()
+	if client == nil {
+		return doPfcpHeartbeatLegacy(upf, upfStr)
 	}
 
-	rsp := resMsg.PfcpMessage.Body.(pfcp.HeartbeatResponse)
-	if rsp.RecoveryTimeStamp == nil {
+	response, err := client.SendHeartbeatRequest(&net.UDPAddr{
+		IP:   upf.NodeID.ResolveNodeIdToIp(),
+		Port: pfcpPeerPort,
+	})
+	if err != nil {
+		cancelUPFAssociation(upf)
+		return fmt.Errorf("SendHeartbeatRequest error: %w", err)
+	}
+	if response == nil || response.RecoveryTimeStamp == nil {
+		cancelUPFAssociation(upf)
+		return fmt.Errorf("PFCP Heartbeat Response from UPF%s is missing Recovery Time Stamp", upfStr)
+	}
+	recoveryTime, err := response.RecoveryTimeStamp.RecoveryTimeStamp()
+	if err != nil {
+		cancelUPFAssociation(upf)
+		return fmt.Errorf("decode PFCP Heartbeat Recovery Time Stamp from UPF%s: %w", upfStr, err)
+	}
+	return acceptHeartbeatRecoveryTime(upf, upfStr, recoveryTime)
+}
+
+func doPfcpHeartbeatLegacy(upf *smf_context.UPF, upfStr string) error {
+	responseMessage, err := legacyMessage.SendPfcpHeartbeatRequest(upf)
+	if err != nil {
+		cancelUPFAssociation(upf)
+		return fmt.Errorf("SendPfcpHeartbeatRequest error: %w", err)
+	}
+	response := responseMessage.PfcpMessage.Body.(legacyPfcp.HeartbeatResponse)
+	if response.RecoveryTimeStamp == nil {
 		logger.MainLog.Warnf("Received PFCP Heartbeat Response without timestamp from UPF%s", upfStr)
 		return nil
 	}
+	return acceptHeartbeatRecoveryTime(upf, upfStr, response.RecoveryTimeStamp.RecoveryTimeStamp)
+}
 
+func acceptHeartbeatRecoveryTime(upf *smf_context.UPF, upfStr string, recoveryTime time.Time) error {
 	logger.MainLog.Debugf("Received PFCP Heartbeat Response from UPF%s", upfStr)
 	if upf.RecoveryTimeStamp.IsZero() {
-		// first receive
-		upf.RecoveryTimeStamp = rsp.RecoveryTimeStamp.RecoveryTimeStamp
-	} else if upf.RecoveryTimeStamp.Before(rsp.RecoveryTimeStamp.RecoveryTimeStamp) {
-		// received a newer recovery timestamp
-		upf.CancelAssociation()
-		upf.RecoveryTimeStamp = time.Time{}
+		upf.RecoveryTimeStamp = recoveryTime
+		return nil
+	}
+	if upf.RecoveryTimeStamp.Before(recoveryTime) {
+		cancelUPFAssociation(upf)
 		return fmt.Errorf("received PFCP Heartbeat Response RecoveryTimeStamp has been updated")
 	}
 	return nil
+}
+
+func cancelUPFAssociation(upf *smf_context.UPF) {
+	if upf.CancelAssociation != nil {
+		upf.CancelAssociation()
+	}
+	upf.RecoveryTimeStamp = time.Time{}
 }
 
 func (p *Processor) releaseAllResourcesOfUPF(upf *smf_context.UPF, upfStr string) {

@@ -127,7 +127,7 @@ func (p *Processor) HandleSMPolicyUpdateNotify(
 
 	smContext.SendUpPathChgNotification("EARLY", SendUpPathChgEventExposureNotification)
 
-	ActivateUPFSession(smContext, nil)
+	p.ActivateUPFSession(smContext, nil)
 
 	smContext.SendUpPathChgNotification("LATE", SendUpPathChgEventExposureNotification)
 

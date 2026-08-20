@@ -59,7 +59,9 @@ func (s *PfcpServer) Dispatch(msg message.Message, addr *net.UDPAddr) {
 	case *message.AssociationReleaseRequest:
 		response = s.handleAssociationReleaseRequest(request)
 	default:
-		s.log.Warnf("unsupported PFCP request %T from %v", msg, addr)
+		if err := dispatchLegacyRequest(msg, addr); err != nil {
+			s.log.Warnf("unsupported PFCP request %T from %v: %v", msg, addr, err)
+		}
 		return
 	}
 
@@ -72,6 +74,22 @@ func (s *PfcpServer) Dispatch(msg message.Message, addr *net.UDPAddr) {
 	if afterResponse != nil {
 		afterResponse()
 	}
+}
+
+// dispatchLegacyRequest is a temporary procedure-level bridge. The datagram
+// was parsed and transaction-managed by the new server; only the handler body
+// is converted back to free5gc/pfcp until that message type is migrated.
+func dispatchLegacyRequest(msg message.Message, addr *net.UDPAddr) error {
+	packet := make([]byte, msg.MarshalLen())
+	if err := msg.MarshalTo(packet); err != nil {
+		return err
+	}
+	legacyMessage := &legacyPfcp.Message{}
+	if err := legacyMessage.Unmarshal(packet); err != nil {
+		return err
+	}
+	Dispatch(pfcpUdp.NewMessage(addr, legacyMessage))
+	return nil
 }
 
 // dispatcher is one fixed worker in the bounded PFCP request pool.

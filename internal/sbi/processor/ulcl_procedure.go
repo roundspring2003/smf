@@ -119,7 +119,7 @@ func (p *Processor) EstablishPSA2(smContext *context.SMContext) {
 
 			sessionContext, exist := smContext.PFCPContext[node.GetNodeIP()]
 			if !exist || sessionContext.RemoteSEID == 0 {
-				go establishPfcpSession(smContext, pfcpState, resChan)
+				go p.establishPfcpSession(smContext, pfcpState, resChan)
 			} else {
 				go modifyExistingPfcpSession(smContext, pfcpState, resChan, "")
 			}

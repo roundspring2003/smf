@@ -46,7 +46,7 @@ type SmfApp struct {
 	processor     *processor.Processor
 	wg            sync.WaitGroup
 
-	pfcpStart     func(*SmfApp)
+	pfcpStart     func(*SmfApp) error
 	pfcpTerminate func()
 }
 
@@ -56,7 +56,7 @@ func GetApp() SmfAppInterface {
 
 func NewApp(
 	ctx context.Context, cfg *factory.Config, tlsKeyLogPath string,
-	pfcpStart func(*SmfApp), pfcpTerminate func(),
+	pfcpStart func(*SmfApp) error, pfcpTerminate func(),
 ) (*SmfApp, error) {
 	smf_context.Init(cfg)
 	smf := &SmfApp{
@@ -209,8 +209,12 @@ func (a *SmfApp) Start() {
 		}()
 	}
 
-	// Initialize PFCP server
-	a.pfcpStart(a)
+	// Initialize PFCP server. A bind/startup failure is fatal to SMF service
+	// readiness because every PDU session procedure depends on N4.
+	if err = a.pfcpStart(a); err != nil {
+		logger.MainLog.Errorf("PFCP server startup failed: %+v", err)
+		a.cancel()
+	}
 
 	a.WaitRoutineStopped()
 }
