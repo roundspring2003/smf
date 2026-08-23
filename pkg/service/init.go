@@ -195,25 +195,30 @@ func (a *SmfApp) SetReportCaller(reportCaller bool) {
 func (a *SmfApp) Start() {
 	logger.InitLog.Infoln("Server started")
 
-	err := a.sbiServer.Run(context.Background(), &a.wg)
-	if err != nil {
-		logger.MainLog.Errorf("sbi server run error %+v", err)
-	}
-
 	a.wg.Add(1)
 	go a.listenShutDownEvent()
+
+	// PFCP must be ready and injected into Processor before SBI accepts any
+	// PDU Session request. Otherwise an early SBI request can observe a nil
+	// PFCP client while the application is only partially started.
+	if err := a.pfcpStart(a); err != nil {
+		logger.MainLog.Errorf("PFCP server startup failed: %+v", err)
+		a.cancel()
+		a.WaitRoutineStopped()
+		return
+	}
+
+	if err := a.sbiServer.Run(context.Background(), &a.wg); err != nil {
+		logger.MainLog.Errorf("SBI server startup failed: %+v", err)
+		a.cancel()
+		a.WaitRoutineStopped()
+		return
+	}
 
 	if a.cfg.AreMetricsEnabled() && a.metricsServer != nil {
 		go func() {
 			a.metricsServer.Run(&a.wg)
 		}()
-	}
-
-	// Initialize PFCP server. A bind/startup failure is fatal to SMF service
-	// readiness because every PDU session procedure depends on N4.
-	if err = a.pfcpStart(a); err != nil {
-		logger.MainLog.Errorf("PFCP server startup failed: %+v", err)
-		a.cancel()
 	}
 
 	a.WaitRoutineStopped()

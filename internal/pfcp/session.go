@@ -76,3 +76,56 @@ func (s *PfcpServer) SendSessionEstablishmentRequest(
 	}
 	return response, nil
 }
+
+// SendSessionDeletionRequest sends one concrete go-pfcp Session Deletion
+// Request through the server-owned transaction layer. The request targets the
+// UPF SEID, while the response must identify the matching CP-local SEID.
+func (s *PfcpServer) SendSessionDeletionRequest(
+	request *message.SessionDeletionRequest,
+	addr *net.UDPAddr,
+	localSEID uint64,
+) (*message.SessionDeletionResponse, error) {
+	if s == nil {
+		return nil, fmt.Errorf("send PFCP Session Deletion Request: nil PFCP server")
+	}
+	if request == nil {
+		return nil, fmt.Errorf("send PFCP Session Deletion Request: nil request")
+	}
+	if request.SEID() == 0 {
+		return nil, fmt.Errorf("send PFCP Session Deletion Request: remote SEID is zero")
+	}
+	if addr == nil || addr.IP == nil || addr.IP.IsUnspecified() {
+		return nil, fmt.Errorf("send PFCP Session Deletion Request: no destination IP address")
+	}
+	if localSEID == 0 {
+		return nil, fmt.Errorf("send PFCP Session Deletion Request: local SEID is zero")
+	}
+
+	received, err := s.SendRequest(request, addr)
+	if err != nil {
+		return nil, fmt.Errorf("PFCP Session Deletion Request to %v: %w", addr, err)
+	}
+	response, ok := received.(*message.SessionDeletionResponse)
+	if !ok {
+		return nil, fmt.Errorf(
+			"received unexpected response %T for PFCP Session Deletion Request", received,
+		)
+	}
+	if response.SEID() != localSEID {
+		return nil, fmt.Errorf(
+			"PFCP Session Deletion Response from %v has SEID %d, want %d",
+			addr, response.SEID(), localSEID,
+		)
+	}
+	if response.Cause == nil {
+		return nil, fmt.Errorf(
+			"PFCP Session Deletion Response from %v is missing Cause", addr,
+		)
+	}
+	if _, err = response.Cause.Cause(); err != nil {
+		return nil, fmt.Errorf(
+			"decode PFCP Session Deletion Response Cause from %v: %w", addr, err,
+		)
+	}
+	return response, nil
+}

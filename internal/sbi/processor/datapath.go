@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"errors"
 	"fmt"
 	"net"
 
@@ -30,6 +31,12 @@ type SessionEstablishmentPFCPClient interface {
 	SendSessionEstablishmentRequest(
 		*goPfcpMessage.SessionEstablishmentRequest, *net.UDPAddr, uint64,
 	) (*goPfcpMessage.SessionEstablishmentResponse, error)
+}
+
+type SessionDeletionPFCPClient interface {
+	SendSessionDeletionRequest(
+		*goPfcpMessage.SessionDeletionRequest, *net.UDPAddr, uint64,
+	) (*goPfcpMessage.SessionDeletionResponse, error)
 }
 
 type SendPfcpResult struct {
@@ -97,6 +104,7 @@ func (p *Processor) ActivateUPFSession(
 	}
 
 	resChan := make(chan SendPfcpResult)
+	establishmentTargets := make(map[string]*PFCPState)
 
 	for ip, pfcp := range pfcpPool {
 		urrIds := []uint32{}
@@ -106,15 +114,28 @@ func (p *Processor) ActivateUPFSession(
 		logger.PduSessLog.Tracef("[ActivateUPFSession] About to send to UPF[%s]: %d PDRs, %d FARs, "+
 			"%d URRs (aggregated IDs: %v)", ip, len(pfcp.pdrList), len(pfcp.farList), len(pfcp.urrList), urrIds)
 		sessionContext, exist := smContext.PFCPContext[ip]
-		if !exist || sessionContext.RemoteSEID == 0 {
+		if !exist || sessionContext == nil || sessionContext.RemoteSEID == 0 {
+			establishmentTargets[ip] = pfcp
 			go p.establishPfcpSession(smContext, pfcp, resChan)
 		} else {
 			go modifyExistingPfcpSession(smContext, pfcp, resChan, "")
 		}
 	}
 
-	waitAllPfcpRsp(smContext, len(pfcpPool), resChan, notifyUeHander)
+	success := waitAllPfcpRsp(smContext, len(pfcpPool), resChan, nil)
 	close(resChan)
+
+	// Initial PDU Session Establishment is atomic across every required UPF.
+	// Roll back only sessions created by this activation; never delete a
+	// pre-existing PFCP session that was merely being modified.
+	if !success && notifyUeHander != nil {
+		if err := p.rollbackEstablishedPfcpSessions(smContext, establishmentTargets); err != nil {
+			logger.PduSessLog.Errorf("rollback partially established PFCP sessions: %v", err)
+		}
+	}
+	if notifyUeHander != nil {
+		notifyUeHander(smContext, success)
+	}
 }
 
 func QueryReport(smContext *smf_context.SMContext, upf *smf_context.UPF,
@@ -301,6 +322,103 @@ func applyCreatedPDRs(
 	return nil
 }
 
+// rollbackEstablishedPfcpSessions deletes only PFCP sessions that were
+// created during the failed activation and therefore now have a RemoteSEID.
+// Deletions run concurrently so one slow UPF does not serialize every peer's
+// transaction timeout. A RemoteSEID is cleared only after an accepted delete.
+func (p *Processor) rollbackEstablishedPfcpSessions(
+	smContext *smf_context.SMContext,
+	establishmentTargets map[string]*PFCPState,
+) error {
+	type rollbackTarget struct {
+		ip             string
+		upf            *smf_context.UPF
+		sessionContext *smf_context.PFCPSessionContext
+		remoteSEID     uint64
+	}
+	targets := make([]rollbackTarget, 0, len(establishmentTargets))
+	errList := make([]error, 0)
+	for ip, state := range establishmentTargets {
+		sessionContext := smContext.PFCPContext[ip]
+		if sessionContext == nil || sessionContext.RemoteSEID == 0 {
+			continue
+		}
+		if state == nil || state.upf == nil {
+			errList = append(errList, fmt.Errorf("UPF %s has a remote PFCP session but no rollback target", ip))
+			continue
+		}
+		targets = append(targets, rollbackTarget{
+			ip:             ip,
+			upf:            state.upf,
+			sessionContext: sessionContext,
+			remoteSEID:     sessionContext.RemoteSEID,
+		})
+	}
+
+	type rollbackResult struct {
+		target rollbackTarget
+		err    error
+	}
+	resultCh := make(chan rollbackResult, len(targets))
+	for _, target := range targets {
+		go func() {
+			resultCh <- rollbackResult{
+				target: target,
+				err: p.deleteEstablishedPfcpSession(
+					target.upf, target.sessionContext.LocalSEID, target.remoteSEID,
+				),
+			}
+		}()
+	}
+	for range targets {
+		result := <-resultCh
+		if result.err != nil {
+			errList = append(errList, fmt.Errorf("UPF %s: %w", result.target.ip, result.err))
+			continue
+		}
+		// Do not clear a newer session if another lifecycle operation replaced
+		// the SEID while this deletion was in flight.
+		if result.target.sessionContext.RemoteSEID == result.target.remoteSEID {
+			result.target.sessionContext.RemoteSEID = 0
+		}
+	}
+	return errors.Join(errList...)
+}
+
+func (p *Processor) deleteEstablishedPfcpSession(
+	upf *smf_context.UPF,
+	localSEID uint64,
+	remoteSEID uint64,
+) error {
+	if err := upf.IsAssociated(); err != nil {
+		return err
+	}
+	client, ok := p.getActivePFCPClient().(SessionDeletionPFCPClient)
+	if !ok {
+		return fmt.Errorf("go-pfcp Session Deletion client is not configured")
+	}
+	request := goPfcpMessage.NewSessionDeletionRequest(0, 0, remoteSEID, 0, 0)
+	response, err := client.SendSessionDeletionRequest(
+		request,
+		&net.UDPAddr{IP: upf.NodeID.ResolveNodeIdToIp(), Port: pfcpPeerPort},
+		localSEID,
+	)
+	if err != nil {
+		return err
+	}
+	if response == nil || response.Cause == nil {
+		return fmt.Errorf("PFCP Session Deletion Response is missing Cause")
+	}
+	cause, err := response.Cause.Cause()
+	if err != nil {
+		return fmt.Errorf("decode PFCP Session Deletion Cause: %w", err)
+	}
+	if cause != ie.CauseRequestAccepted {
+		return fmt.Errorf("PFCP Session Deletion rejected with Cause %d", cause)
+	}
+	return nil
+}
+
 func modifyExistingPfcpSession(
 	smContext *smf_context.SMContext,
 	state *PFCPState,
@@ -346,14 +464,10 @@ func waitAllPfcpRsp(
 	pfcpPoolLen int,
 	resChan <-chan SendPfcpResult,
 	notifyUeHander func(*smf_context.SMContext, bool),
-) {
+) bool {
 	success := true
 	for i := 0; i < pfcpPoolLen; i++ {
 		res := <-resChan
-		if notifyUeHander == nil {
-			continue
-		}
-
 		if res.Status == smf_context.SessionEstablishFailed ||
 			res.Status == smf_context.SessionUpdateFailed {
 			success = false
@@ -362,6 +476,7 @@ func waitAllPfcpRsp(
 	if notifyUeHander != nil {
 		notifyUeHander(smContext, success)
 	}
+	return success
 }
 
 func (p *Processor) EstHandler(isDone <-chan struct{},
@@ -386,8 +501,13 @@ func (p *Processor) sendPDUSessionEstablishmentReject(
 	smContext *smf_context.SMContext,
 	nasErrorCause uint8,
 ) {
+	// Local/NF cleanup must not depend on whether AMF notification succeeds.
+	// The actual SMContext removal waits for the caller-held SMLock, so this
+	// defer is safe while the establishment goroutine is still finishing.
+	defer p.RemoveSMContextFromAllNF(smContext, true)
+
 	smNasBuf, err := smf_context.BuildGSMPDUSessionEstablishmentReject(
-		smContext, nasie.Cause5GSM_NwFailure)
+		smContext, nasErrorCause)
 	if err != nil {
 		logger.PduSessLog.Errorf("Build GSM PDUSessionEstablishmentReject failed: %s", err)
 		return
@@ -422,7 +542,6 @@ func (p *Processor) sendPDUSessionEstablishmentReject(
 	if rspData.Cause == models.Amf_Comm_N1N2MessageTransferCause_N1_MSG_NOT_TRANSFERRED {
 		logger.PduSessLog.Warnf("%v", rspData.Cause)
 	}
-	p.RemoveSMContextFromAllNF(smContext, true)
 }
 
 func (p *Processor) sendPDUSessionEstablishmentAccept(

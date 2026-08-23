@@ -212,6 +212,7 @@ go-pfcp 則以 `*ie.IE` 與 getter 表示協定欄位。
 - [x] Production startup 已改為只建立一個新 `PfcpServer`；不再呼叫 legacy `udp.Run()`，也不再用固定 sleep 等待 socket。
 - [x] `Run()`／bind 失敗會回傳到 `SmfApp.Start()` 並觸發 shutdown，避免 SBI 存活但 N4 不可用。
 - [x] Shutdown 先取消 PFCP parent context，再 `Stop()` server 並等待 main／receiver／bounded workers 全部結束。
+- [x] 啟動順序改為先讓 PFCP bind/run 並注入 Processor，再啟動 SBI；外部 SBI request 不會看到尚未配置的 PFCP client。PFCP 或 SBI 啟動失敗都會取消 app 並執行 cleanup。
 
 ### 5.2 Receive path
 
@@ -430,7 +431,8 @@ configuration:
 - [x] Establishment response 驗證 response type、local SEID、Node ID、Cause，以及 accepted response 必須包含可解析的 UP F-SEID。
 - [x] accepted response 將 UP F-SEID 寫入 `RemoteSEID`，並解析 Created PDR；若 UPF 配置 F-TEID，依 PDR ID 回填 `PDI.LocalFTeid`。
 - [x] 現階段為降低 rule mapping 回歸風險，Create PDR/FAR/QER/URR/BAR 仍沿用既有 builder 後做 wire round trip，server/transaction/response 已完全是 go-pfcp。下一步逐項以 `ie.NewXXX` 取代此 builder 內部轉換。
-- [ ] 遷移 Session Deletion。
+- [x] 初始建立任一必要 UPF 失敗時，會先以新 `PfcpServer`／go-pfcp Session Deletion rollback 此次已取得 `RemoteSEID` 的 UPF，再通知 UE 失敗；不會誤刪既有 modification session，且 AMF N1N2 失敗不會跳過 SMContext cleanup。
+- [ ] 完整遷移一般 Session Deletion／Release 與 Usage Report；目前只有 establishment rollback deletion 已走 concrete go-pfcp。
 - [ ] 將 Session Establishment rule builder 改成直接建立 go-pfcp grouped IE，移除內部 legacy body conversion。
 - [ ] 遷移 Session Modification。
 - [x] Session Establishment unit test 已涵蓋 accepted/rejected Cause、SEID mismatch、缺少 UP F-SEID、builder round trip 與 Created PDR/F-TEID。

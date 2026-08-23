@@ -123,3 +123,57 @@ func TestSendSessionEstablishmentRequestRequiresUPFSEIDWhenAccepted(t *testing.T
 		t.Fatalf("UPF peer error: %v", peerErr)
 	}
 }
+
+func TestSendSessionDeletionRequest(t *testing.T) {
+	s, _ := startTestPfcpServer(t)
+	const localSEID uint64 = 0x0102030405060708
+	const remoteSEID uint64 = 0x1112131415161718
+	peerAddr, peerDone := startAssociationPeer(t, func(received message.Message) (message.Message, error) {
+		request, ok := received.(*message.SessionDeletionRequest)
+		if !ok {
+			return nil, fmt.Errorf("received %T, want *message.SessionDeletionRequest", received)
+		}
+		if request.SEID() != remoteSEID {
+			return nil, fmt.Errorf("request SEID = %d, want %d", request.SEID(), remoteSEID)
+		}
+		return message.NewSessionDeletionResponse(
+			0, 0, localSEID, request.Sequence(), 0,
+			ie.NewCause(ie.CauseRequestAccepted),
+		), nil
+	})
+
+	response, err := s.SendSessionDeletionRequest(
+		message.NewSessionDeletionRequest(0, 0, remoteSEID, 0, 0),
+		peerAddr,
+		localSEID,
+	)
+	if err != nil {
+		t.Fatalf("SendSessionDeletionRequest() error: %v", err)
+	}
+	if err = <-peerDone; err != nil {
+		t.Fatalf("UPF peer error: %v", err)
+	}
+	assertCause(t, response.Cause, ie.CauseRequestAccepted)
+}
+
+func TestSendSessionDeletionRequestRequiresCause(t *testing.T) {
+	s, _ := startTestPfcpServer(t)
+	const localSEID uint64 = 42
+	peerAddr, peerDone := startAssociationPeer(t, func(received message.Message) (message.Message, error) {
+		return message.NewSessionDeletionResponse(
+			0, 0, localSEID, received.Sequence(), 0,
+		), nil
+	})
+
+	_, err := s.SendSessionDeletionRequest(
+		message.NewSessionDeletionRequest(0, 0, 77, 0, 0),
+		peerAddr,
+		localSEID,
+	)
+	if err == nil || !strings.Contains(err.Error(), "missing Cause") {
+		t.Fatalf("SendSessionDeletionRequest() error = %v, want missing Cause", err)
+	}
+	if peerErr := <-peerDone; peerErr != nil {
+		t.Fatalf("UPF peer error: %v", peerErr)
+	}
+}

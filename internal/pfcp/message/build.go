@@ -411,6 +411,12 @@ func BuildPfcpSessionEstablishmentRequest(
 	msg.CreatePDR = make([]*pfcp.CreatePDR, 0)
 	msg.CreateFAR = make([]*pfcp.CreateFAR, 0)
 
+	// TODO(go-pfcp migration): Building a request currently changes rule state
+	// to RULE_CREATE before the UPF accepts it. Make this builder side-effect
+	// free and commit only the rules included in the request after a fully
+	// validated Session Establishment Response with Cause=Request Accepted.
+	// A timeout needs explicit unknown-outcome handling rather than a blind
+	// rollback because the UPF may have created the session and lost its reply.
 	for _, pdr := range pdrList {
 		if pdr.State == context.RULE_INITIAL {
 			msg.CreatePDR = append(msg.CreatePDR, pdrToCreatePDR(pdr))
@@ -591,6 +597,11 @@ func BuildPfcpSessionModificationRequest(
 		Ipv4Address: context.GetSelf().ExternalIP().To4(),
 	}
 
+	// TODO(go-pfcp migration): As in the Establishment builder, these state
+	// assignments happen before the UPF accepts the request. Replace them with
+	// a prepared change set and commit it only after a validated accepted
+	// Session Modification Response; preserve an explicit unknown outcome on
+	// timeout instead of treating it as a definite rollback.
 	for _, pdr := range pdrList {
 		switch pdr.State {
 		case context.RULE_INITIAL:
