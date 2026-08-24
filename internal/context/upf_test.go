@@ -9,13 +9,13 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 
 	nasie "github.com/free5gc/nas/ie"
-	"github.com/free5gc/pfcp/pfcpType"
 	smf_context "github.com/free5gc/smf/internal/context"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 	"github.com/free5gc/smf/pkg/factory"
 )
 
-var mockIPv4NodeID = &pfcpType.NodeID{
-	NodeIdType: pfcpType.NodeIdTypeIpv4Address,
+var mockIPv4NodeID = &pfcptype.NodeID{
+	NodeIdType: pfcptype.NodeIdTypeIpv4Address,
 	IP:         net.ParseIP("127.0.0.1"),
 }
 

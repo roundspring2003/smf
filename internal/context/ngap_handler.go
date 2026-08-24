@@ -7,8 +7,8 @@ import (
 
 	ngapie "github.com/free5gc/ngap/ie"
 	"github.com/free5gc/openapi/models"
-	"github.com/free5gc/pfcp/pfcpType"
 	"github.com/free5gc/smf/internal/logger"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 )
 
 func strNgapCause(cause *ngapie.Cause) string {
@@ -344,24 +344,24 @@ func HandleHandoverRequestAcknowledgeTransfer(b []byte, ctx *SMContext) error {
 		} else {
 			ctx.IndirectForwardingTunnel.FirstDPNode.UpLinkTunnel.TEID = teid
 			ctx.IndirectForwardingTunnel.FirstDPNode.UpLinkTunnel.PDR = indirectFowardingPDR
-			indirectFowardingPDR.PDI.LocalFTeid = &pfcpType.FTEID{
+			indirectFowardingPDR.PDI.LocalFTeid = &pfcptype.FTEID{
 				V4:          originPDR.PDI.LocalFTeid.V4,
 				Teid:        ctx.IndirectForwardingTunnel.FirstDPNode.UpLinkTunnel.TEID,
 				Ipv4Address: originPDR.PDI.LocalFTeid.Ipv4Address,
 			}
-			indirectFowardingPDR.OuterHeaderRemoval = &pfcpType.OuterHeaderRemoval{
-				OuterHeaderRemovalDescription: pfcpType.OuterHeaderRemovalGtpUUdpIpv4,
+			indirectFowardingPDR.OuterHeaderRemoval = &pfcptype.OuterHeaderRemoval{
+				OuterHeaderRemovalDescription: pfcptype.OuterHeaderRemovalGtpUUdpIpv4,
 			}
 
-			indirectFowardingPDR.FAR.ApplyAction = pfcpType.ApplyAction{
+			indirectFowardingPDR.FAR.ApplyAction = pfcptype.ApplyAction{
 				Forw: true,
 			}
 			indirectFowardingPDR.FAR.ForwardingParameters = &ForwardingParameters{
-				DestinationInterface: pfcpType.DestinationInterface{
-					InterfaceValue: pfcpType.DestinationInterfaceAccess,
+				DestinationInterface: pfcptype.DestinationInterface{
+					InterfaceValue: pfcptype.DestinationInterfaceAccess,
 				},
-				OuterHeaderCreation: &pfcpType.OuterHeaderCreation{
-					OuterHeaderCreationDescription: pfcpType.OuterHeaderCreationGtpUUdpIpv4,
+				OuterHeaderCreation: &pfcptype.OuterHeaderCreation{
+					OuterHeaderCreationDescription: pfcptype.OuterHeaderCreationGtpUUdpIpv4,
 					Teid:                           binary.BigEndian.Uint32(DLForwardingGTPTunnel.GTPTEID.Value),
 					Ipv4Address:                    DLForwardingGTPTunnel.TransportLayerAddress.Value.Bytes,
 				},

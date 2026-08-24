@@ -3,7 +3,6 @@ package processor
 import (
 	"time"
 
-	legacyPfcpType "github.com/free5gc/pfcp/pfcpType"
 	"github.com/wmnsk/go-pfcp/ie"
 
 	smf_context "github.com/free5gc/smf/internal/context"
@@ -17,7 +16,7 @@ func (p *Processor) SetupAssociation(
 	peer pfcptype.NodeID,
 	_ time.Time,
 ) (uint8, func()) {
-	if smf_context.RetrieveUPFNodeByNodeID(toLegacyNodeID(peer)) == nil {
+	if smf_context.RetrieveUPFNodeByNodeID(peer) == nil {
 		return ie.CauseRequestRejected, nil
 	}
 	return ie.CauseRequestAccepted, nil
@@ -27,18 +26,10 @@ func (p *Processor) SetupAssociation(
 // configured UPF topology. The active state machine performs session cleanup
 // and decides whether to establish the configured association again.
 func (p *Processor) ReleaseAssociation(peer pfcptype.NodeID) uint8 {
-	upf := smf_context.RetrieveUPFNodeByNodeID(toLegacyNodeID(peer))
+	upf := smf_context.RetrieveUPFNodeByNodeID(peer)
 	if upf == nil {
 		return ie.CauseNoEstablishedPFCPAssociation
 	}
 	cancelUPFAssociation(upf)
 	return ie.CauseRequestAccepted
-}
-
-func toLegacyNodeID(nodeID pfcptype.NodeID) legacyPfcpType.NodeID {
-	return legacyPfcpType.NodeID{
-		NodeIdType: nodeID.NodeIdType,
-		IP:         nodeID.IP,
-		FQDN:       nodeID.FQDN,
-	}
 }

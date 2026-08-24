@@ -63,7 +63,10 @@ type PfcpServer struct {
 
 	associationMu    sync.RWMutex
 	associationState AssociationStateManager
-	log              *logrus.Entry
+
+	sessionReportMu      sync.RWMutex
+	sessionReportHandler SessionReportHandler
+	log                  *logrus.Entry
 }
 
 func NewPfcpServer(smf smfIface, addr string) *PfcpServer {
@@ -312,9 +315,8 @@ func sendToRcvCh(
 }
 
 // SendRequest sends one concrete go-pfcp request through the server-owned
-// transaction layer. It is also the migration boundary for procedures whose IE
-// builders/handlers still use free5gc/pfcp while production UDP already uses
-// PfcpServer.
+// transaction layer. Procedure-specific senders validate the concrete response
+// type, mandatory IEs and SEID after this transport-level operation returns.
 func (s *PfcpServer) SendRequest(request message.Message, addr *net.UDPAddr) (message.Message, error) {
 	if s == nil || request == nil || !request.IsRequest() {
 		return nil, fmt.Errorf("send PFCP request: invalid request")

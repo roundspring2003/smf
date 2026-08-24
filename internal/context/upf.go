@@ -14,9 +14,8 @@ import (
 
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/models"
-	"github.com/free5gc/pfcp/pfcpType"
-	"github.com/free5gc/pfcp/pfcpUdp"
 	"github.com/free5gc/smf/internal/logger"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 	"github.com/free5gc/smf/pkg/factory"
 	"github.com/free5gc/util/idgenerator"
 )
@@ -46,9 +45,9 @@ func (t *UPTunnel) UpdateANInformation(ip net.IP, teid uint32) {
 				DLPDR.FAR.ForwardingParameters.SendEndMarker = true
 			}
 
-			DLPDR.FAR.ForwardingParameters.OuterHeaderCreation = new(pfcpType.OuterHeaderCreation)
+			DLPDR.FAR.ForwardingParameters.OuterHeaderCreation = new(pfcptype.OuterHeaderCreation)
 			dlOuterHeaderCreation := DLPDR.FAR.ForwardingParameters.OuterHeaderCreation
-			dlOuterHeaderCreation.OuterHeaderCreationDescription = pfcpType.OuterHeaderCreationGtpUUdpIpv4
+			dlOuterHeaderCreation.OuterHeaderCreationDescription = pfcptype.OuterHeaderCreationGtpUUdpIpv4
 			dlOuterHeaderCreation.Teid = t.ANInformation.TEID
 			dlOuterHeaderCreation.Ipv4Address = t.ANInformation.IPAddress.To4()
 			DLPDR.FAR.State = RULE_UPDATE
@@ -66,7 +65,7 @@ const (
 
 type UPF struct {
 	uuid              uuid.UUID
-	NodeID            pfcpType.NodeID
+	NodeID            pfcptype.NodeID
 	Addr              string
 	RecoveryTimeStamp time.Time
 
@@ -236,7 +235,7 @@ func (t *UPTunnel) RemoveDataPath(pathID int64) {
 
 // *** add unit test ***//
 // NewUPF returns a new UPF context in SMF
-func NewUPF(nodeID *pfcpType.NodeID, ifaces []*factory.InterfaceUpfInfoItem) (upf *UPF) {
+func NewUPF(nodeID *pfcptype.NodeID, ifaces []*factory.InterfaceUpfInfoItem) (upf *UPF) {
 	upf = new(UPF)
 	upf.uuid = uuid.New()
 
@@ -297,17 +296,17 @@ func (upf *UPF) GetInterface(interfaceType models.Nrf_NFMgmt_UPInterfaceType, dn
 func (upf *UPF) PFCPAddr() *net.UDPAddr {
 	return &net.UDPAddr{
 		IP:   upf.NodeID.ResolveNodeIdToIp(),
-		Port: pfcpUdp.PFCP_PORT,
+		Port: 8805,
 	}
 }
 
 // *** add unit test ***//
-func RetrieveUPFNodeByNodeID(nodeID pfcpType.NodeID) *UPF {
+func RetrieveUPFNodeByNodeID(nodeID pfcptype.NodeID) *UPF {
 	var targetUPF *UPF = nil
 	upfPool.Range(func(key, value interface{}) bool {
 		curUPF := value.(*UPF)
 		if curUPF.NodeID.NodeIdType != nodeID.NodeIdType &&
-			(curUPF.NodeID.NodeIdType == pfcpType.NodeIdTypeFqdn || nodeID.NodeIdType == pfcpType.NodeIdTypeFqdn) {
+			(curUPF.NodeID.NodeIdType == pfcptype.NodeIdTypeFqdn || nodeID.NodeIdType == pfcptype.NodeIdTypeFqdn) {
 			curUPFNodeIdIP := curUPF.NodeID.ResolveNodeIdToIp().To4()
 			nodeIdIP := nodeID.ResolveNodeIdToIp().To4()
 			logger.CtxLog.Tracef("RetrieveUPF - upfNodeIdIP:[%+v], nodeIdIP:[%+v]", curUPFNodeIdIP, nodeIdIP)
@@ -326,13 +325,13 @@ func RetrieveUPFNodeByNodeID(nodeID pfcpType.NodeID) *UPF {
 }
 
 // *** add unit test ***//
-func RemoveUPFNodeByNodeID(nodeID pfcpType.NodeID) bool {
+func RemoveUPFNodeByNodeID(nodeID pfcptype.NodeID) bool {
 	upfID := ""
 	upfPool.Range(func(key, value interface{}) bool {
 		upfID = key.(string)
 		upf := value.(*UPF)
 		if upf.NodeID.NodeIdType != nodeID.NodeIdType &&
-			(upf.NodeID.NodeIdType == pfcpType.NodeIdTypeFqdn || nodeID.NodeIdType == pfcpType.NodeIdTypeFqdn) {
+			(upf.NodeID.NodeIdType == pfcptype.NodeIdTypeFqdn || nodeID.NodeIdType == pfcptype.NodeIdTypeFqdn) {
 			upfNodeIdIP := upf.NodeID.ResolveNodeIdToIp().To4()
 			nodeIdIP := nodeID.ResolveNodeIdToIp().To4()
 			logger.CtxLog.Tracef("RemoveUPF - upfNodeIdIP:[%+v], nodeIdIP:[%+v]", upfNodeIdIP, nodeIdIP)

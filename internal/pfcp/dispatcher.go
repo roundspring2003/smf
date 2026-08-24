@@ -5,38 +5,8 @@ import (
 	"runtime/debug"
 	"sync"
 
-	legacyPfcp "github.com/free5gc/pfcp"
-	"github.com/free5gc/pfcp/pfcpUdp"
 	"github.com/wmnsk/go-pfcp/message"
-
-	"github.com/free5gc/smf/internal/logger"
-	"github.com/free5gc/smf/internal/pfcp/handler"
 )
-
-// Dispatch is the legacy free5gc/pfcp dispatcher. It remains until the SMF
-// runtime and all request handlers have moved to PfcpServer.Dispatch.
-func Dispatch(msg *pfcpUdp.Message) {
-	switch msg.PfcpMessage.Header.MessageType {
-	case legacyPfcp.PFCP_HEARTBEAT_REQUEST:
-		handler.HandlePfcpHeartbeatRequest(msg)
-	case legacyPfcp.PFCP_PFD_MANAGEMENT_REQUEST:
-		handler.HandlePfcpPfdManagementRequest(msg)
-	case legacyPfcp.PFCP_ASSOCIATION_SETUP_REQUEST:
-		handler.HandlePfcpAssociationSetupRequest(msg)
-	case legacyPfcp.PFCP_ASSOCIATION_UPDATE_REQUEST:
-		handler.HandlePfcpAssociationUpdateRequest(msg)
-	case legacyPfcp.PFCP_ASSOCIATION_RELEASE_REQUEST:
-		handler.HandlePfcpAssociationReleaseRequest(msg)
-	case legacyPfcp.PFCP_NODE_REPORT_REQUEST:
-		handler.HandlePfcpNodeReportRequest(msg)
-	case legacyPfcp.PFCP_SESSION_SET_DELETION_REQUEST:
-		handler.HandlePfcpSessionSetDeletionRequest(msg)
-	case legacyPfcp.PFCP_SESSION_REPORT_REQUEST:
-		handler.HandlePfcpSessionReportRequest(msg)
-	default:
-		logger.PfcpLog.Errorf("Unknown PFCP message type: %d", msg.PfcpMessage.Header.MessageType)
-	}
-}
 
 // SetDispatch replaces the request callback used by the bounded dispatcher
 // workers. NewPfcpServer installs PfcpServer.Dispatch by default; tests and
@@ -58,10 +28,25 @@ func (s *PfcpServer) Dispatch(msg message.Message, addr *net.UDPAddr) {
 		response, afterResponse = s.handleAssociationSetupRequest(request)
 	case *message.AssociationReleaseRequest:
 		response = s.handleAssociationReleaseRequest(request)
+	case *message.AssociationUpdateRequest:
+		// TODO(go-pfcp migration): validate mandatory IEs, update association
+		// state and return an Association Update Response with an appropriate Cause.
+		s.log.Warnf("PFCP Association Update Request handling is not implemented (sequence=%#x from=%v)",
+			request.Sequence(), addr)
+	case *message.NodeReportRequest:
+		// TODO(go-pfcp migration): parse Node Report Type and the report-specific
+		// grouped IEs before returning a Node Report Response.
+		s.log.Warnf("PFCP Node Report Request handling is not implemented (sequence=%#x from=%v)",
+			request.Sequence(), addr)
+	case *message.SessionSetDeletionRequest:
+		// TODO(go-pfcp migration): identify the targeted session set, coordinate
+		// SM-context cleanup and return a Session Set Deletion Response.
+		s.log.Warnf("PFCP Session Set Deletion Request handling is not implemented (sequence=%#x from=%v)",
+			request.Sequence(), addr)
+	case *message.SessionReportRequest:
+		response = s.handleSessionReportRequest(request)
 	default:
-		if err := dispatchLegacyRequest(msg, addr); err != nil {
-			s.log.Warnf("unsupported PFCP request %T from %v: %v", msg, addr, err)
-		}
+		s.log.Warnf("unsupported PFCP request %T from %v", msg, addr)
 		return
 	}
 
@@ -74,22 +59,6 @@ func (s *PfcpServer) Dispatch(msg message.Message, addr *net.UDPAddr) {
 	if afterResponse != nil {
 		afterResponse()
 	}
-}
-
-// dispatchLegacyRequest is a temporary procedure-level bridge. The datagram
-// was parsed and transaction-managed by the new server; only the handler body
-// is converted back to free5gc/pfcp until that message type is migrated.
-func dispatchLegacyRequest(msg message.Message, addr *net.UDPAddr) error {
-	packet := make([]byte, msg.MarshalLen())
-	if err := msg.MarshalTo(packet); err != nil {
-		return err
-	}
-	legacyMessage := &legacyPfcp.Message{}
-	if err := legacyMessage.Unmarshal(packet); err != nil {
-		return err
-	}
-	Dispatch(pfcpUdp.NewMessage(addr, legacyMessage))
-	return nil
 }
 
 // dispatcher is one fixed worker in the bounded PFCP request pool.

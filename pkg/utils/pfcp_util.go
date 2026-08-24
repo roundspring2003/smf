@@ -7,7 +7,6 @@ import (
 
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/pfcp"
-	legacyUDP "github.com/free5gc/smf/internal/pfcp/udp"
 	"github.com/free5gc/smf/pkg/service"
 )
 
@@ -29,6 +28,7 @@ func InitPFCPFunc(pCtx context.Context) (func(app *service.SmfApp) error, func()
 		smfContext.PfcpContext, smfContext.PfcpCancelFunc = context.WithCancel(pCtx)
 		newServer := pfcp.NewPfcpServer(app, smfContext.ListenIP().String())
 		newServer.SetAssociationStateManager(app.Processor())
+		newServer.SetSessionReportHandler(app.Processor())
 		if err := newServer.Run(&serverWG); err != nil {
 			smfContext.PfcpCancelFunc()
 			return err
@@ -36,10 +36,6 @@ func InitPFCPFunc(pCtx context.Context) (func(app *service.SmfApp) error, func()
 
 		server = newServer
 		app.Processor().SetActivePFCPClient(newServer)
-
-		// Session procedures not migrated to go-pfcp structs yet pass through a
-		// wire-format adapter, but still use newServer for UDP and transaction.
-		legacyUDP.UseTransport(newServer, newServer.RecoveryTime())
 
 		for _, upNode := range smfContext.UserPlaneInformation.UPFs {
 			go app.Processor().ToBeAssociatedWithUPF(smfContext.PfcpContext, upNode.UPF)

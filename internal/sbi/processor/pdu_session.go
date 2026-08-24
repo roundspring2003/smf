@@ -18,9 +18,9 @@ import (
 	"github.com/free5gc/openapi/models"
 	"github.com/free5gc/openapi/pcf/SMPolCtrl"
 	"github.com/free5gc/openapi/udm/SDM"
-	"github.com/free5gc/pfcp/pfcpType"
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 	smf_errors "github.com/free5gc/smf/pkg/errors"
 	"github.com/free5gc/smf/pkg/factory"
 	"github.com/free5gc/util/metrics/sbi"
@@ -484,7 +484,7 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 
 			smContext.SetState(smf_context.PFCPModification)
 
-			pfcpResponseStatus = releaseSession(smContext)
+			pfcpResponseStatus = p.releaseSession(smContext)
 		case *message.PDUSessRelComplete:
 			smContext.CheckState(smf_context.InActivePending)
 			// Wait till the state becomes Active again
@@ -586,7 +586,7 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 					for curDataPathNode := dataPath.FirstDPNode; curDataPathNode != nil; curDataPathNode = curDataPathNode.Next() {
 						if curDataPathNode.IsANUPF() {
 							urrList = append(urrList, curDataPathNode.UpLinkTunnel.PDR.URR...)
-							QueryReport(smContext, curDataPathNode.UPF, urrList, models.Chf_ConvCharging_TriggerType_USER_LOCATION_CHANGE)
+							p.QueryReport(smContext, curDataPathNode.UPF, urrList, models.Chf_ConvCharging_TriggerType_USER_LOCATION_CHANGE)
 						}
 					}
 				}
@@ -632,7 +632,7 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 				ANUPF := dataPath.FirstDPNode
 				DLPDR := ANUPF.DownLinkTunnel.PDR
 
-				DLPDR.FAR.ApplyAction = pfcpType.ApplyAction{
+				DLPDR.FAR.ApplyAction = pfcptype.ApplyAction{
 					Buff: false,
 					Drop: false,
 					Dupl: false,
@@ -640,10 +640,10 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 					Nocp: false,
 				}
 				DLPDR.FAR.ForwardingParameters = &smf_context.ForwardingParameters{
-					DestinationInterface: pfcpType.DestinationInterface{
-						InterfaceValue: pfcpType.DestinationInterfaceAccess,
+					DestinationInterface: pfcptype.DestinationInterface{
+						InterfaceValue: pfcptype.DestinationInterfaceAccess,
 					},
-					NetworkInstance: &pfcpType.NetworkInstance{
+					NetworkInstance: &pfcptype.NetworkInstance{
 						NetworkInstance: smContext.Dnn,
 						FQDNEncoding:    factory.SmfConfig.Configuration.NwInstFqdnEncoding,
 					},
@@ -685,14 +685,14 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 						continue
 					}
 
-					ULPDR.FAR.ApplyAction = pfcpType.ApplyAction{
+					ULPDR.FAR.ApplyAction = pfcptype.ApplyAction{
 						Buff: false,
 						Drop: false,
 						Dupl: false,
 						Forw: true,
 						Nocp: false,
 					}
-					DLPDR.FAR.ApplyAction = pfcpType.ApplyAction{
+					DLPDR.FAR.ApplyAction = pfcptype.ApplyAction{
 						Buff: false,
 						Drop: false,
 						Dupl: false,
@@ -811,14 +811,14 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 								continue
 							}
 
-							ULPDR.FAR.ApplyAction = pfcpType.ApplyAction{
+							ULPDR.FAR.ApplyAction = pfcptype.ApplyAction{
 								Buff: false,
 								Drop: false,
 								Dupl: false,
 								Forw: true,
 								Nocp: false,
 							}
-							DLPDR.FAR.ApplyAction = pfcpType.ApplyAction{
+							DLPDR.FAR.ApplyAction = pfcptype.ApplyAction{
 								Buff: false,
 								Drop: false,
 								Dupl: false,
@@ -1120,7 +1120,7 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 				}
 			}
 
-			pfcpResponseStatus = releaseSession(smContext)
+			pfcpResponseStatus = p.releaseSession(smContext)
 		default:
 			smContext.Log.Infof("Not needs to send pfcp release")
 		}
@@ -1274,7 +1274,7 @@ func (p *Processor) HandlePDUSessionSMContextRelease(
 		smContext.Log.Infof("PFCP session already released (State: %s), skip PFCP releaseSession", smContext.State().String())
 		pfcpResponseStatus = smf_context.SessionReleaseSuccess
 	} else {
-		pfcpResponseStatus = releaseSession(smContext)
+		pfcpResponseStatus = p.releaseSession(smContext)
 	}
 
 	switch pfcpResponseStatus {
@@ -1378,7 +1378,7 @@ func (p *Processor) HandlePDUSessionSMContextLocalRelease(
 		smContext.Log.Infof("PFCP session already released (State: %s), skip PFCP releaseSession", smContext.State().String())
 		pfcpResponseStatus = smf_context.SessionReleaseSuccess
 	} else {
-		pfcpResponseStatus = releaseSession(smContext)
+		pfcpResponseStatus = p.releaseSession(smContext)
 	}
 
 	switch pfcpResponseStatus {
@@ -1414,11 +1414,11 @@ func (p *Processor) HandlePDUSessionSMContextLocalRelease(
 	}
 }
 
-func releaseSession(smContext *smf_context.SMContext) smf_context.PFCPSessionResponseStatus {
+func (p *Processor) releaseSession(smContext *smf_context.SMContext) smf_context.PFCPSessionResponseStatus {
 	smContext.PFCPReleaseDone = false
 	smContext.SetState(smf_context.PFCPModification)
 
-	for _, res := range ReleaseTunnel(smContext) {
+	for _, res := range p.ReleaseTunnel(smContext) {
 		if res.Status != smf_context.SessionReleaseSuccess {
 			return res.Status
 		}
@@ -1428,7 +1428,7 @@ func releaseSession(smContext *smf_context.SMContext) smf_context.PFCPSessionRes
 		return smf_context.SessionReleaseSuccess
 	}
 
-	for _, res := range ReleaseDcTunnel(smContext) {
+	for _, res := range p.ReleaseDcTunnel(smContext) {
 		if res.Status != smf_context.SessionReleaseSuccess {
 			return res.Status
 		}

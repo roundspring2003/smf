@@ -325,7 +325,7 @@ configuration:
 
 - [ ] Association Setup／Release 的 IE 清單。
 - [ ] Heartbeat 的 Recovery Time Stamp。
-- [ ] Session Establishment 的 NodeID、CP F-SEID、Create PDR/FAR/QER/URR/BAR。
+- [x] Session Establishment 的 NodeID、CP F-SEID、Create PDR/FAR/QER/URR/BAR（已直接使用 go-pfcp `ie.NewXXX()`）。
 - [ ] Session Modification 的 Update/Remove/Create rule mapping。
 - [ ] Session Deletion 與 Usage Report。
 - [ ] Session Report Request／Response 的 DLDR、USAR 等 flags。
@@ -425,38 +425,46 @@ configuration:
 
 ### Phase 4：Session basic procedures
 
-- [x] Production UDP/transaction 已切到新 `PfcpServer`。尚未重寫的 Session procedure 經 legacy wire bridge：legacy struct marshal → go-pfcp parse → 新 TxTransaction；response 反向轉回既有 Processor 所需型別。
-- [x] 被動 Session Report 等未遷移 handler 由新 bounded dispatcher 同步橋接，不再由 legacy server 每筆建立無上限 dispatch goroutine。
+- [x] Production UDP/transaction 已切到唯一的新 `PfcpServer`；legacy wire bridge 與舊 UDP server 已移除。
+- [x] 被動 Session Report 直接接收 concrete go-pfcp request，由 bounded dispatcher 呼叫 Processor；不再轉回 legacy message，也不會每筆建立無上限 goroutine。
+- [x] `AssociationUpdateRequest`、`NodeReportRequest`、`SessionSetDeletionRequest` 已有明確 dispatcher case 與 TODO warning；procedure/state/response 尚未實作，因此目前不回覆成功。
 - [x] Session Establishment sender 已直接使用 concrete `*message.SessionEstablishmentRequest`／`*message.SessionEstablishmentResponse` 與新 `PfcpServer` transaction；Processor 不再接收 legacy `pfcpUdp.Message`。
 - [x] Establishment response 驗證 response type、local SEID、Node ID、Cause，以及 accepted response 必須包含可解析的 UP F-SEID。
 - [x] accepted response 將 UP F-SEID 寫入 `RemoteSEID`，並解析 Created PDR；若 UPF 配置 F-TEID，依 PDR ID 回填 `PDI.LocalFTeid`。
-- [x] 現階段為降低 rule mapping 回歸風險，Create PDR/FAR/QER/URR/BAR 仍沿用既有 builder 後做 wire round trip，server/transaction/response 已完全是 go-pfcp。下一步逐項以 `ie.NewXXX` 取代此 builder 內部轉換。
+- [x] Session Establishment Create PDR/PDI/FAR/QER/URR/BAR 已直接以 `ie.NewXXX()` 建立 grouped IE；移除 production builder 的 legacy body marshal → go-pfcp parse round trip。
+- [x] N4 Create BAR 僅攜帶 mandatory BAR ID；不再沿用 legacy 固定加入 zero Downlink Data Notification Delay 的行為。
 - [x] 初始建立任一必要 UPF 失敗時，會先以新 `PfcpServer`／go-pfcp Session Deletion rollback 此次已取得 `RemoteSEID` 的 UPF，再通知 UE 失敗；不會誤刪既有 modification session，且 AMF N1N2 失敗不會跳過 SMContext cleanup。
-- [ ] 完整遷移一般 Session Deletion／Release 與 Usage Report；目前只有 establishment rollback deletion 已走 concrete go-pfcp。
-- [ ] 將 Session Establishment rule builder 改成直接建立 go-pfcp grouped IE，移除內部 legacy body conversion。
-- [ ] 遷移 Session Modification。
-- [x] Session Establishment unit test 已涵蓋 accepted/rejected Cause、SEID mismatch、缺少 UP F-SEID、builder round trip 與 Created PDR/F-TEID。
+- [x] 一般 Session Deletion／Release、establishment rollback deletion 與 Usage Report 都使用 concrete go-pfcp message/IE。
+- [x] SMF rule/context 的 PFCP domain fields 已換成 SMF 自有 `internal/pfcp/pfcptype`，wire boundary 才映射到 go-pfcp IE。
+- [x] Session Modification 已改成 direct grouped IE builder、concrete sender/response validation 與 Usage Report parsing。
+- [x] Session Establishment unit test 已涵蓋 accepted/rejected Cause、SEID mismatch、缺少 UP F-SEID、direct grouped IE mapping、N4 BAR delay omission與 Created PDR/F-TEID；Modification 另涵蓋 Update FAR、OHC byte order、End Marker、BAR 與 Query URR。
 - [ ] 使用實際 UPF 驗證 Session Establishment wire compatibility。
 
 ### Phase 5：Session Report 與 Charging
 
-- 遷移 Downlink Data Report。
-- 遷移 Usage Report、URRID、UsageReportTrigger 與 volume/duration。
-- 驗證與 CHF charging/update quota 流程。
+- [x] Downlink Data Report 改由 concrete go-pfcp IE 處理並通知 AMF。
+- [x] Usage Report、URRID、UsageReportTrigger 與 volume/packet counters 改由 go-pfcp getter 解析。
+- [x] Session Report 透過 Processor adapter 接回 CHF charging/update quota 流程。
+- [x] Usage Report 先整批驗證，再一次寫入 charging state，避免半批套用。
+- [ ] 使用實際 UPF/CHF 驗證 Downlink Data Report 與 charging quota update。
 
 ### Phase 6：清除 context 舊型別
 
-- 移除剩餘 `pfcpType`。
-- 統一 NodeID、FTEID、rule 與 report domain model。
-- 刪除不再使用的 conversion/workaround。
+- [x] 移除所有程式與測試中的舊 `pfcpType` import。
+- [x] 統一 NodeID、FTEID、rule 與 report domain model 至 `internal/pfcp/pfcptype`。
+- [x] 刪除 legacy NodeID conversion、wire adapter 與 fallback。
 
 ### Phase 7：移除舊 dependency
 
+- [x] 刪除 legacy `internal/pfcp/handler`、`internal/pfcp/udp` 與舊 message build/send 實作。
+- [x] `go mod tidy` 已移除 `github.com/free5gc/pfcp` 與其專用 indirect dependency。
+- [x] Go source、test、`go.mod`、`go.sum` 無舊 PFCP import/reference。
+- [x] `go test ./...` 與 `go test -race ./...` 通過。
+
 ```bash
-rg 'github.com/free5gc/pfcp' .
-go mod tidy
+rg 'github.com/free5gc/pfcp' --glob='*.go' --glob='go.mod' --glob='go.sum' .
 go test ./...
-go test -race ./internal/pfcp/...
+go test -race ./...
 ```
 
 ---
@@ -510,10 +518,10 @@ go test -race ./internal/pfcp/...
 
 ## 10. 完成條件
 
-- [ ] `go.mod` 不再依賴 `github.com/free5gc/pfcp`。
-- [ ] 程式與測試中沒有 `github.com/free5gc/pfcp` import。
-- [ ] 不存在為了相容舊 API 而重建的 `pfcpType`/`pfcpUdp` facade。
-- [ ] 所有 PFCP Message/IE 使用指定版本的 go-pfcp。
+- [x] `go.mod` 不再依賴 `github.com/free5gc/pfcp`。
+- [x] 程式與測試中沒有 `github.com/free5gc/pfcp` import。
+- [x] 不存在為了相容舊 API 而重建的 `pfcpType`/`pfcpUdp` facade。
+- [x] 所有 PFCP Message/IE 使用指定版本的 go-pfcp。
 - [ ] Heartbeat、Association、Session Establishment、Modification、Deletion、Report 全部通過。
 - [x] Timeout、retry、duplicate request 與 bounded dispatch 行為有 foundation unit test。
 - [ ] malformed packet 與 missing mandatory IE 不會造成 panic。

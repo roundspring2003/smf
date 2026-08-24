@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/free5gc/pfcp/pfcpType"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
@@ -35,8 +35,8 @@ func (f *fakeActivePFCPClient) SendHeartbeatRequest(
 func newActiveAssociationTestUPF(t *testing.T) *smf_context.UPF {
 	t.Helper()
 	upf := &smf_context.UPF{
-		NodeID: pfcpType.NodeID{
-			NodeIdType: pfcpType.NodeIdTypeIpv4Address,
+		NodeID: pfcptype.NodeID{
+			NodeIdType: pfcptype.NodeIdTypeIpv4Address,
 			IP:         net.ParseIP("192.0.2.10").To4(),
 		},
 	}

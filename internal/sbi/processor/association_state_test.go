@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	legacyPfcpType "github.com/free5gc/pfcp/pfcpType"
 	"github.com/wmnsk/go-pfcp/ie"
 
 	smf_context "github.com/free5gc/smf/internal/context"
@@ -14,16 +13,13 @@ import (
 )
 
 func TestProcessorPassiveAssociationStateUsesConfiguredUPF(t *testing.T) {
-	legacyNodeID := legacyPfcpType.NodeID{
-		NodeIdType: legacyPfcpType.NodeIdTypeIpv4Address,
-		IP:         net.ParseIP("192.0.2.81").To4(),
-	}
-	upf := smf_context.NewUPF(&legacyNodeID, nil)
-	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(legacyNodeID) })
-	peer := pfcptype.NodeID{
+	nodeID := pfcptype.NodeID{
 		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
 		IP:         net.ParseIP("192.0.2.81").To4(),
 	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+	peer := nodeID
 	p := &Processor{}
 
 	cause, afterResponse := p.SetupAssociation(peer, time.Now())

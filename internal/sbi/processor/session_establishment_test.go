@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/free5gc/pfcp/pfcpType"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
@@ -94,8 +94,8 @@ func (f *fakeRollbackPFCPClient) SendSessionDeletionRequest(
 
 func rollbackTestUPF(ip string) *context.UPF {
 	return &context.UPF{
-		NodeID: pfcpType.NodeID{
-			NodeIdType: pfcpType.NodeIdTypeIpv4Address,
+		NodeID: pfcptype.NodeID{
+			NodeIdType: pfcptype.NodeIdTypeIpv4Address,
 			IP:         net.ParseIP(ip).To4(),
 		},
 		AssociationContext: stdcontext.Background(),

@@ -9,13 +9,11 @@ import (
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/mediatype/multipart"
 	"github.com/free5gc/openapi/models"
-	legacyPfcp "github.com/free5gc/pfcp"
-	"github.com/free5gc/pfcp/pfcpType"
 	"github.com/wmnsk/go-pfcp/message"
 
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
-	legacyMessage "github.com/free5gc/smf/internal/pfcp/message"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 )
 
 const pfcpPeerPort = 8805
@@ -67,7 +65,7 @@ func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *s
 }
 
 func formatUPF(upf *smf_context.UPF) string {
-	if upf.NodeID.NodeIdType == pfcpType.NodeIdTypeFqdn {
+	if upf.NodeID.NodeIdType == pfcptype.NodeIdTypeFqdn {
 		return fmt.Sprintf("[%s](%s)", upf.NodeID.FQDN, upf.NodeID.ResolveNodeIdToIp().String())
 	}
 	return fmt.Sprintf("[%s]", upf.NodeID.ResolveNodeIdToIp().String())
@@ -127,7 +125,7 @@ func (p *Processor) setupPfcpAssociation(upf *smf_context.UPF, upfStr string) er
 
 	client := p.getActivePFCPClient()
 	if client == nil {
-		return setupPfcpAssociationLegacy(upf, upfStr)
+		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
 	response, err := client.SendAssociationSetupRequest(&net.UDPAddr{
@@ -145,24 +143,6 @@ func (p *Processor) setupPfcpAssociation(upf *smf_context.UPF, upfStr string) er
 		return fmt.Errorf("decode PFCP Association Setup Recovery Time Stamp from UPF%s: %w", upfStr, err)
 	}
 	upf.RecoveryTimeStamp = recoveryTime
-
-	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
-	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
-	return nil
-}
-
-func setupPfcpAssociationLegacy(upf *smf_context.UPF, upfStr string) error {
-	responseMessage, err := legacyMessage.SendPfcpAssociationSetupRequest(upf.NodeID)
-	if err != nil {
-		return err
-	}
-	response := responseMessage.PfcpMessage.Body.(legacyPfcp.PFCPAssociationSetupResponse)
-	if response.Cause == nil || response.Cause.CauseValue != pfcpType.CauseRequestAccepted {
-		return fmt.Errorf("received PFCP Association Setup Not Accepted Response from UPF%s", upfStr)
-	}
-	if response.NodeID == nil {
-		return fmt.Errorf("pfcp association needs NodeID")
-	}
 
 	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
 	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
@@ -199,7 +179,7 @@ func (p *Processor) doPfcpHeartbeat(upf *smf_context.UPF, upfStr string) error {
 	logger.MainLog.Debugf("Sending PFCP Heartbeat Request to UPF%s", upfStr)
 	client := p.getActivePFCPClient()
 	if client == nil {
-		return doPfcpHeartbeatLegacy(upf, upfStr)
+		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
 	response, err := client.SendHeartbeatRequest(&net.UDPAddr{
@@ -220,20 +200,6 @@ func (p *Processor) doPfcpHeartbeat(upf *smf_context.UPF, upfStr string) error {
 		return fmt.Errorf("decode PFCP Heartbeat Recovery Time Stamp from UPF%s: %w", upfStr, err)
 	}
 	return acceptHeartbeatRecoveryTime(upf, upfStr, recoveryTime)
-}
-
-func doPfcpHeartbeatLegacy(upf *smf_context.UPF, upfStr string) error {
-	responseMessage, err := legacyMessage.SendPfcpHeartbeatRequest(upf)
-	if err != nil {
-		cancelUPFAssociation(upf)
-		return fmt.Errorf("SendPfcpHeartbeatRequest error: %w", err)
-	}
-	response := responseMessage.PfcpMessage.Body.(legacyPfcp.HeartbeatResponse)
-	if response.RecoveryTimeStamp == nil {
-		logger.MainLog.Warnf("Received PFCP Heartbeat Response without timestamp from UPF%s", upfStr)
-		return nil
-	}
-	return acceptHeartbeatRecoveryTime(upf, upfStr, response.RecoveryTimeStamp.RecoveryTimeStamp)
 }
 
 func acceptHeartbeatRecoveryTime(upf *smf_context.UPF, upfStr string, recoveryTime time.Time) error {

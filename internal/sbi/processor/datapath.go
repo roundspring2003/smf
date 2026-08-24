@@ -8,12 +8,10 @@ import (
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/mediatype/multipart"
 	"github.com/free5gc/openapi/models"
-	"github.com/free5gc/pfcp"
-	"github.com/free5gc/pfcp/pfcpType"
-	"github.com/free5gc/pfcp/pfcpUdp"
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
 	pfcp_message "github.com/free5gc/smf/internal/pfcp/message"
+	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 	"github.com/wmnsk/go-pfcp/ie"
 	goPfcpMessage "github.com/wmnsk/go-pfcp/message"
 )
@@ -33,6 +31,12 @@ type SessionEstablishmentPFCPClient interface {
 	) (*goPfcpMessage.SessionEstablishmentResponse, error)
 }
 
+type SessionModificationPFCPClient interface {
+	SendSessionModificationRequest(
+		*goPfcpMessage.SessionModificationRequest, *net.UDPAddr, uint64,
+	) (*goPfcpMessage.SessionModificationResponse, error)
+}
+
 type SessionDeletionPFCPClient interface {
 	SendSessionDeletionRequest(
 		*goPfcpMessage.SessionDeletionRequest, *net.UDPAddr, uint64,
@@ -41,7 +45,6 @@ type SessionDeletionPFCPClient interface {
 
 type SendPfcpResult struct {
 	Status smf_context.PFCPSessionResponseStatus
-	RcvMsg *pfcpUdp.Message
 	Err    error
 }
 
@@ -118,7 +121,7 @@ func (p *Processor) ActivateUPFSession(
 			establishmentTargets[ip] = pfcp
 			go p.establishPfcpSession(smContext, pfcp, resChan)
 		} else {
-			go modifyExistingPfcpSession(smContext, pfcp, resChan, "")
+			go p.modifyExistingPfcpSession(smContext, pfcp, resChan, "")
 		}
 	}
 
@@ -138,7 +141,7 @@ func (p *Processor) ActivateUPFSession(
 	}
 }
 
-func QueryReport(smContext *smf_context.SMContext, upf *smf_context.UPF,
+func (p *Processor) QueryReport(smContext *smf_context.SMContext, upf *smf_context.UPF,
 	urrs []*smf_context.URR, reportResaon models.Chf_ConvCharging_TriggerType,
 ) {
 	for _, urr := range urrs {
@@ -151,7 +154,7 @@ func QueryReport(smContext *smf_context.SMContext, upf *smf_context.UPF,
 	}
 
 	resChan := make(chan SendPfcpResult)
-	go modifyExistingPfcpSession(smContext, pfcpState, resChan, reportResaon)
+	go p.modifyExistingPfcpSession(smContext, pfcpState, resChan, reportResaon)
 	pfcpResult := <-resChan
 
 	if pfcpResult.Err != nil {
@@ -308,7 +311,7 @@ func applyCreatedPDRs(
 		if pdr == nil {
 			return fmt.Errorf("Created PDR refers to unknown PDR ID %d", pdrID)
 		}
-		pdr.PDI.LocalFTeid = &pfcpType.FTEID{
+		pdr.PDI.LocalFTeid = &pfcptype.FTEID{
 			Chid:        fteid.HasChID(),
 			Ch:          fteid.HasCh(),
 			V4:          fteid.HasIPv4(),
@@ -419,42 +422,88 @@ func (p *Processor) deleteEstablishedPfcpSession(
 	return nil
 }
 
-func modifyExistingPfcpSession(
+func (p *Processor) sendSessionModificationRequest(
+	smContext *smf_context.SMContext,
+	state *PFCPState,
+) (*goPfcpMessage.SessionModificationResponse, error) {
+	if state == nil || state.upf == nil {
+		return nil, fmt.Errorf("PFCP Session Modification has no target UPF")
+	}
+	if err := state.upf.IsAssociated(); err != nil {
+		return nil, err
+	}
+	nodeIP := state.upf.NodeID.ResolveNodeIdToIp()
+	nodeIPString := nodeIP.String()
+	sessionContext := smContext.PFCPContext[nodeIPString]
+	if sessionContext == nil {
+		return nil, fmt.Errorf("PFCP session context for UPF %s does not exist", nodeIPString)
+	}
+	request, err := pfcp_message.BuildSessionModificationRequest(
+		nodeIPString, state.upf.UUID(), smContext,
+		state.pdrList, state.farList, state.barList, state.qerList, state.urrList,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build PFCP Session Modification Request: %w", err)
+	}
+	client, ok := p.getActivePFCPClient().(SessionModificationPFCPClient)
+	if !ok {
+		return nil, fmt.Errorf("go-pfcp Session Modification client is not configured")
+	}
+	response, err := client.SendSessionModificationRequest(
+		request,
+		&net.UDPAddr{IP: nodeIP, Port: pfcpPeerPort},
+		sessionContext.LocalSEID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, fmt.Errorf("PFCP Session Modification client returned a nil response")
+	}
+	return response, nil
+}
+
+func (p *Processor) modifyExistingPfcpSession(
 	smContext *smf_context.SMContext,
 	state *PFCPState,
 	resCh chan<- SendPfcpResult,
-	reportResaon models.Chf_ConvCharging_TriggerType,
+	reportReason models.Chf_ConvCharging_TriggerType,
 ) {
 	logger.PduSessLog.Infoln("Sending PFCP Session Modification Request")
-
-	rcvMsg, err := pfcp_message.SendPfcpSessionModificationRequest(
-		state.upf, smContext, state.pdrList, state.farList, state.barList, state.qerList, state.urrList)
+	response, err := p.sendSessionModificationRequest(smContext, state)
 	if err != nil {
 		logger.PduSessLog.Warnf("Sending PFCP Session Modification Request error: %+v", err)
+		resCh <- SendPfcpResult{Status: smf_context.SessionUpdateFailed, Err: err}
+		return
+	}
+	if response.Cause == nil {
 		resCh <- SendPfcpResult{
 			Status: smf_context.SessionUpdateFailed,
-			Err:    err,
+			Err:    fmt.Errorf("PFCP Session Modification Response is missing Cause"),
+		}
+		return
+	}
+	cause, err := response.Cause.Cause()
+	if err != nil {
+		resCh <- SendPfcpResult{
+			Status: smf_context.SessionUpdateFailed,
+			Err:    fmt.Errorf("decode PFCP Session Modification Cause: %w", err),
+		}
+		return
+	}
+	if cause != ie.CauseRequestAccepted {
+		resCh <- SendPfcpResult{
+			Status: smf_context.SessionUpdateFailed,
+			Err:    fmt.Errorf("PFCP Session Modification rejected with Cause %d", cause),
 		}
 		return
 	}
 
-	logger.PduSessLog.Infoln("Received PFCP Session Modification Response")
-
-	rsp := rcvMsg.PfcpMessage.Body.(pfcp.PFCPSessionModificationResponse)
-	if rsp.Cause != nil && rsp.Cause.CauseValue == pfcpType.CauseRequestAccepted {
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionUpdateSuccess,
-			RcvMsg: rcvMsg,
-		}
-		if rsp.UsageReport != nil {
-			SEID := rcvMsg.PfcpMessage.Header.SEID
-			upfNodeID := smContext.GetNodeIDByLocalSEID(SEID)
-			smContext.HandleReports(nil, rsp.UsageReport, nil, upfNodeID, reportResaon)
-		}
-	} else {
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionUpdateFailed,
-			Err:    fmt.Errorf("cause[%d] if not request accepted", rsp.Cause.CauseValue),
+	logger.PduSessLog.Infoln("Received PFCP Session Modification Accepted Response")
+	resCh <- SendPfcpResult{Status: smf_context.SessionUpdateSuccess}
+	if len(response.UsageReport) != 0 {
+		if err = smContext.HandleReports(response.UsageReport, state.upf.NodeID, reportReason); err != nil {
+			logger.PduSessLog.Errorf("decode PFCP Session Modification Usage Report: %v", err)
 		}
 	}
 }
@@ -613,17 +662,18 @@ func (p *Processor) updateAnUpfPfcpSession(
 	urrList []*smf_context.URR,
 ) smf_context.PFCPSessionResponseStatus {
 	defaultPath := smContext.Tunnel.DataPathPool.GetDefaultPath()
-	ANUPF := defaultPath.FirstDPNode
-	rcvMsg, err := pfcp_message.SendPfcpSessionModificationRequest(
-		ANUPF.UPF, smContext, pdrList, farList, barList, qerList, urrList)
+	anUPF := defaultPath.FirstDPNode
+	response, err := p.sendSessionModificationRequest(smContext, &PFCPState{
+		upf: anUPF.UPF, pdrList: pdrList, farList: farList,
+		barList: barList, qerList: qerList, urrList: urrList,
+	})
 	if err != nil {
 		logger.PduSessLog.Warnf("Sending PFCP Session Modification Request to AN UPF error: %+v", err)
 		return smf_context.SessionUpdateFailed
 	}
-
-	rsp := rcvMsg.PfcpMessage.Body.(pfcp.PFCPSessionModificationResponse)
-	if rsp.Cause == nil || rsp.Cause.CauseValue != pfcpType.CauseRequestAccepted {
-		logger.PduSessLog.Warn("Received PFCP Session Modification Not Accepted Response from AN UPF")
+	cause, err := response.Cause.Cause()
+	if err != nil || cause != ie.CauseRequestAccepted {
+		logger.PduSessLog.Warnf("Received PFCP Session Modification Not Accepted Response from AN UPF: cause=%d err=%v", cause, err)
 		return smf_context.SessionUpdateFailed
 	}
 
@@ -643,7 +693,7 @@ func (p *Processor) updateAnUpfPfcpSession(
 	return smf_context.SessionUpdateSuccess
 }
 
-func ReleaseTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
+func (p *Processor) ReleaseTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
 	resChan := make(chan SendPfcpResult)
 
 	deletedPfcpNode := make(map[string]bool)
@@ -660,7 +710,7 @@ func ReleaseTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
 				continue
 			}
 			if _, exist := deletedPfcpNode[curUPFID]; !exist {
-				go deletePfcpSession(node.UPF, smContext, resChan)
+				go p.deletePfcpSession(node.UPF, smContext, resChan)
 				deletedPfcpNode[curUPFID] = true
 			}
 		}
@@ -675,7 +725,7 @@ func ReleaseTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
 	return resList
 }
 
-func ReleaseDcTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
+func (p *Processor) ReleaseDcTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
 	resChan := make(chan SendPfcpResult)
 
 	deletedPfcpNode := make(map[string]bool)
@@ -692,7 +742,7 @@ func ReleaseDcTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
 				continue
 			}
 			if _, exist := deletedPfcpNode[curUPFID]; !exist {
-				go deletePfcpSession(node.UPF, smContext, resChan)
+				go p.deletePfcpSession(node.UPF, smContext, resChan)
 				deletedPfcpNode[curUPFID] = true
 			}
 		}
@@ -706,43 +756,75 @@ func ReleaseDcTunnel(smContext *smf_context.SMContext) []SendPfcpResult {
 	return resList
 }
 
-func deletePfcpSession(upf *smf_context.UPF, ctx *smf_context.SMContext, resCh chan<- SendPfcpResult) {
+func (p *Processor) deletePfcpSession(
+	upf *smf_context.UPF,
+	ctx *smf_context.SMContext,
+	resCh chan<- SendPfcpResult,
+) {
 	logger.PduSessLog.Infoln("Sending PFCP Session Deletion Request")
-
-	rcvMsg, err := pfcp_message.SendPfcpSessionDeletionRequest(upf, ctx)
+	if upf == nil {
+		resCh <- SendPfcpResult{Status: smf_context.SessionReleaseFailed, Err: fmt.Errorf("nil UPF")}
+		return
+	}
+	if err := upf.IsAssociated(); err != nil {
+		resCh <- SendPfcpResult{Status: smf_context.SessionReleaseFailed, Err: err}
+		return
+	}
+	nodeIP := upf.NodeID.ResolveNodeIdToIp()
+	sessionContext := ctx.PFCPContext[nodeIP.String()]
+	if sessionContext == nil {
+		resCh <- SendPfcpResult{
+			Status: smf_context.SessionReleaseFailed,
+			Err:    fmt.Errorf("PFCP session context for UPF %s does not exist", nodeIP),
+		}
+		return
+	}
+	client, ok := p.getActivePFCPClient().(SessionDeletionPFCPClient)
+	if !ok {
+		resCh <- SendPfcpResult{
+			Status: smf_context.SessionReleaseFailed,
+			Err:    fmt.Errorf("go-pfcp Session Deletion client is not configured"),
+		}
+		return
+	}
+	request := goPfcpMessage.NewSessionDeletionRequest(0, 0, sessionContext.RemoteSEID, 0, 0)
+	response, err := client.SendSessionDeletionRequest(
+		request,
+		&net.UDPAddr{IP: nodeIP, Port: pfcpPeerPort},
+		sessionContext.LocalSEID,
+	)
 	if err != nil {
-		logger.PduSessLog.Warnf("Sending PFCP Session Deletion Request error: %+v", err)
+		resCh <- SendPfcpResult{Status: smf_context.SessionReleaseFailed, Err: err}
+		return
+	}
+	if response == nil || response.Cause == nil {
 		resCh <- SendPfcpResult{
 			Status: smf_context.SessionReleaseFailed,
-			Err:    err,
+			Err:    fmt.Errorf("PFCP Session Deletion Response is missing Cause"),
+		}
+		return
+	}
+	cause, err := response.Cause.Cause()
+	if err != nil {
+		resCh <- SendPfcpResult{
+			Status: smf_context.SessionReleaseFailed,
+			Err:    fmt.Errorf("decode PFCP Session Deletion Cause: %w", err),
+		}
+		return
+	}
+	if cause != ie.CauseRequestAccepted {
+		resCh <- SendPfcpResult{
+			Status: smf_context.SessionReleaseFailed,
+			Err:    fmt.Errorf("PFCP Session Deletion rejected with Cause %d", cause),
 		}
 		return
 	}
 
-	rsp := rcvMsg.PfcpMessage.Body.(pfcp.PFCPSessionDeletionResponse)
-	if rsp.Cause == nil {
-		logger.PduSessLog.Errorf("PFCP Session Deletion Response missing Cause")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionReleaseFailed,
-			Err:    fmt.Errorf("missing Cause in PFCP Session Deletion Response"),
-		}
-		return
-	}
-	if rsp.Cause.CauseValue == pfcpType.CauseRequestAccepted {
-		logger.PduSessLog.Info("Received PFCP Session Deletion Accepted Response")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionReleaseSuccess,
-		}
-		if rsp.UsageReport != nil {
-			SEID := rcvMsg.PfcpMessage.Header.SEID
-			upfNodeID := ctx.GetNodeIDByLocalSEID(SEID)
-			ctx.HandleReports(nil, nil, rsp.UsageReport, upfNodeID, "")
-		}
-	} else {
-		logger.PduSessLog.Warn("Received PFCP Session Deletion Not Accepted Response")
-		resCh <- SendPfcpResult{
-			Status: smf_context.SessionReleaseFailed,
-			Err:    fmt.Errorf("cause[%d] if not request accepted", rsp.Cause.CauseValue),
+	logger.PduSessLog.Info("Received PFCP Session Deletion Accepted Response")
+	resCh <- SendPfcpResult{Status: smf_context.SessionReleaseSuccess}
+	if len(response.UsageReport) != 0 {
+		if err = ctx.HandleReports(response.UsageReport, upf.NodeID, ""); err != nil {
+			logger.PduSessLog.Errorf("decode PFCP Session Deletion Usage Report: %v", err)
 		}
 	}
 }

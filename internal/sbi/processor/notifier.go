@@ -71,7 +71,7 @@ func (p *Processor) chargingNotificationProcedure(
 				logger.ChargingLog.Warnf("Cound not find upf %s", upfId)
 				continue
 			}
-			QueryReport(smContext, upf, urrList, models.Chf_ConvCharging_TriggerType_FORCED_REAUTHORISATION)
+			p.QueryReport(smContext, upf, urrList, models.Chf_ConvCharging_TriggerType_FORCED_REAUTHORISATION)
 		}
 		p.ReportUsageAndUpdateQuota(smContext)
 	} else {

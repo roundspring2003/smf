@@ -20,8 +20,6 @@ import (
 	"github.com/free5gc/openapi/mediatype/multipart"
 	"github.com/free5gc/openapi/models"
 	smf_context "github.com/free5gc/smf/internal/context"
-	"github.com/free5gc/smf/internal/pfcp"
-	"github.com/free5gc/smf/internal/pfcp/udp"
 	"github.com/free5gc/smf/internal/sbi/consumer"
 	"github.com/free5gc/smf/internal/sbi/processor"
 	PDUSession_errors "github.com/free5gc/smf/pkg/errors"
@@ -370,8 +368,6 @@ func initDiscAMFStubNRF() {
 func initStubPFCP() {
 	smfContext := smf_context.GetSelf()
 	smfContext.PfcpContext, smfContext.PfcpCancelFunc = context.WithCancel(context.Background())
-
-	udp.Run(pfcp.Dispatch)
 }
 
 func buildPDUSessionEstablishmentRequest(pduSessID uint8, pti uint8, pduType uint8) []byte {
@@ -633,9 +629,6 @@ func TestHandlePDUSessionSMContextCreate(t *testing.T) {
 			}
 		})
 	}
-
-	err = udp.ClosePfcp()
-	require.NoError(t, err)
 }
 
 func TestHandlePDUSessionSMContextCreate_InvalidDnnSnssaiInputs(t *testing.T) {
@@ -760,7 +753,4 @@ func TestHandlePDUSessionSMContextCreate_InvalidDnnSnssaiInputs(t *testing.T) {
 			)
 		})
 	}
-
-	err = udp.ClosePfcp()
-	require.NoError(t, err)
 }

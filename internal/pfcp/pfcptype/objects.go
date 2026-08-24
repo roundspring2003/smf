@@ -36,6 +36,23 @@ func (n NodeID) String() string {
 	}
 }
 
+// ResolveNodeIdToIp returns the configured address or resolves an FQDN.
+// Lookup failure returns an unspecified IPv4 address.
+func (n NodeID) ResolveNodeIdToIp() net.IP {
+	switch n.NodeIdType {
+	case NodeIdTypeIpv4Address, NodeIdTypeIpv6Address:
+		return n.IP
+	case NodeIdTypeFqdn:
+		addresses, err := net.LookupIP(n.FQDN)
+		if err != nil || len(addresses) == 0 {
+			return net.IPv4zero
+		}
+		return addresses[0]
+	default:
+		return net.IPv4zero
+	}
+}
+
 func (n *NodeID) EqualsTo(other *NodeID) bool {
 	if n == nil || other == nil || n.NodeIdType != other.NodeIdType {
 		return false
@@ -86,6 +103,7 @@ type SourceInterface struct {
 }
 
 type NetworkInstance struct {
+	FQDNEncoding    bool
 	NetworkInstance string
 }
 
@@ -157,7 +175,7 @@ type DestinationInterface struct {
 }
 
 const (
-	OuterHeaderCreationGtpUUdpIpv4 uint16 = 1 << iota
+	OuterHeaderCreationGtpUUdpIpv4 uint16 = 1 << (8 + iota)
 	OuterHeaderCreationGtpUUdpIpv6
 	OuterHeaderCreationUdpIpv4
 	OuterHeaderCreationUdpIpv6
@@ -285,3 +303,6 @@ const (
 type MeasurementInformation struct {
 	Flags uint8
 }
+
+func (m MeasurementInformation) HasMNOP() bool { return m.Flags&MeasureInfoMNOP != 0 }
+func (m MeasurementInformation) HasMBQE() bool { return m.Flags&MeasureInfoMBQE != 0 }

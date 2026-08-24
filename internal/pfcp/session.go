@@ -77,6 +77,59 @@ func (s *PfcpServer) SendSessionEstablishmentRequest(
 	return response, nil
 }
 
+// SendSessionModificationRequest sends one concrete go-pfcp Session Modification
+// Request through the server-owned transaction layer. A rejected response is
+// returned to the processor as a valid protocol result.
+func (s *PfcpServer) SendSessionModificationRequest(
+	request *message.SessionModificationRequest,
+	addr *net.UDPAddr,
+	localSEID uint64,
+) (*message.SessionModificationResponse, error) {
+	if s == nil {
+		return nil, fmt.Errorf("send PFCP Session Modification Request: nil PFCP server")
+	}
+	if request == nil {
+		return nil, fmt.Errorf("send PFCP Session Modification Request: nil request")
+	}
+	if request.SEID() == 0 {
+		return nil, fmt.Errorf("send PFCP Session Modification Request: remote SEID is zero")
+	}
+	if addr == nil || addr.IP == nil || addr.IP.IsUnspecified() {
+		return nil, fmt.Errorf("send PFCP Session Modification Request: no destination IP address")
+	}
+	if localSEID == 0 {
+		return nil, fmt.Errorf("send PFCP Session Modification Request: local SEID is zero")
+	}
+
+	received, err := s.SendRequest(request, addr)
+	if err != nil {
+		return nil, fmt.Errorf("PFCP Session Modification Request to %v: %w", addr, err)
+	}
+	response, ok := received.(*message.SessionModificationResponse)
+	if !ok {
+		return nil, fmt.Errorf(
+			"received unexpected response %T for PFCP Session Modification Request", received,
+		)
+	}
+	if response.SEID() != localSEID {
+		return nil, fmt.Errorf(
+			"PFCP Session Modification Response from %v has SEID %d, want %d",
+			addr, response.SEID(), localSEID,
+		)
+	}
+	if response.Cause == nil {
+		return nil, fmt.Errorf(
+			"PFCP Session Modification Response from %v is missing Cause", addr,
+		)
+	}
+	if _, err = response.Cause.Cause(); err != nil {
+		return nil, fmt.Errorf(
+			"decode PFCP Session Modification Response Cause from %v: %w", addr, err,
+		)
+	}
+	return response, nil
+}
+
 // SendSessionDeletionRequest sends one concrete go-pfcp Session Deletion
 // Request through the server-owned transaction layer. The request targets the
 // UPF SEID, while the response must identify the matching CP-local SEID.

@@ -101,3 +101,23 @@ func TestReportingTriggerIEIncludesSecondAndThirdOctets(t *testing.T) {
 		}
 	})
 }
+
+func TestOuterHeaderCreationDescriptionsUseWireRepresentation(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uint16
+		want uint16
+	}{
+		{name: "GTP-U UDP IPv4", got: OuterHeaderCreationGtpUUdpIpv4, want: 0x0100},
+		{name: "GTP-U UDP IPv6", got: OuterHeaderCreationGtpUUdpIpv6, want: 0x0200},
+		{name: "UDP IPv4", got: OuterHeaderCreationUdpIpv4, want: 0x0400},
+		{name: "UDP IPv6", got: OuterHeaderCreationUdpIpv6, want: 0x0800},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.got != test.want {
+				t.Fatalf("description = %#04x, want %#04x", test.got, test.want)
+			}
+		})
+	}
+}
