@@ -1,22 +1,26 @@
-package pfcp
+package pfcp_test
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/free5gc/smf/internal/pfcp"
+)
 
 func TestSeqAllocatorStaysWithin24Bits(t *testing.T) {
-	a := NewSeqAllocator()
+	a := pfcp.NewSeqAllocator()
 	for i := 0; i < 1000; i++ {
 		seq, err := a.Allocate()
 		if err != nil {
 			t.Fatalf("Allocate() error: %v", err)
 		}
-		if seq > maxPFCPSequenceNumber {
+		if seq > 0xFFFFFF {
 			t.Fatalf("sequence %#x exceeds the 24-bit range", seq)
 		}
 	}
 }
 
 func TestSeqAllocatorFreeAllowsReuse(t *testing.T) {
-	a := NewSeqAllocatorRange(0, 2)
+	a := pfcp.NewSeqAllocatorRange(0, 2)
 	s1, err := a.Allocate()
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +46,7 @@ func TestSeqAllocatorFreeAllowsReuse(t *testing.T) {
 }
 
 func TestSeqAllocatorWrapsAndSkipsInUseIDs(t *testing.T) {
-	a := NewSeqAllocatorRange(5, 6)
+	a := pfcp.NewSeqAllocatorRange(5, 6)
 	first, err := a.Allocate()
 	if err != nil {
 		t.Fatal(err)
