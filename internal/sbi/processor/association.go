@@ -6,11 +6,11 @@ import (
 	"net"
 	"time"
 
+	"github.com/wmnsk/go-pfcp/message"
+
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/mediatype/multipart"
 	"github.com/free5gc/openapi/models"
-	"github.com/wmnsk/go-pfcp/message"
-
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"

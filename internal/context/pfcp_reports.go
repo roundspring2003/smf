@@ -3,9 +3,9 @@ package context
 import (
 	"fmt"
 
-	"github.com/free5gc/openapi/models"
 	"github.com/wmnsk/go-pfcp/ie"
 
+	"github.com/free5gc/openapi/models"
 	"github.com/free5gc/smf/internal/logger"
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 )
@@ -29,7 +29,7 @@ func (smContext *SMContext) HandleReports(
 	for index, grouped := range reports {
 		report, err := usageReportFromIE(grouped, upf.UUID(), reportType)
 		if err != nil {
-			return fmt.Errorf("Usage Report[%d]: %w", index, err)
+			return fmt.Errorf("usage report[%d]: %w", index, err)
 		}
 		decoded = append(decoded, report)
 	}

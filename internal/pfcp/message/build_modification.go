@@ -233,7 +233,7 @@ func newApplyActionIE(action pfcptype.ApplyAction) *ie.IE {
 
 func newUpdateForwardingParametersIE(parameters *context.ForwardingParameters) (*ie.IE, error) {
 	if parameters.DestinationInterface.InterfaceValue > 0x0f {
-		return nil, fmt.Errorf("Destination Interface %d exceeds 4 bits", parameters.DestinationInterface.InterfaceValue)
+		return nil, fmt.Errorf("destination interface %d exceeds 4 bits", parameters.DestinationInterface.InterfaceValue)
 	}
 	children := []*ie.IE{ie.NewDestinationInterface(parameters.DestinationInterface.InterfaceValue)}
 	if networkInstance := parameters.NetworkInstance; networkInstance != nil {
@@ -242,14 +242,14 @@ func newUpdateForwardingParametersIE(parameters *context.ForwardingParameters) (
 	if header := parameters.OuterHeaderCreation; header != nil {
 		descriptionOctet := uint8(header.OuterHeaderCreationDescription >> 8)
 		if descriptionOctet&0x0f == 0 {
-			return nil, fmt.Errorf("Outer Header Creation description has no GTP-U/UDP flag")
+			return nil, fmt.Errorf("outer header creation description has no GTP-U/UDP flag")
 		}
 		if descriptionOctet&0x05 != 0 && header.Ipv4Address.To4() == nil {
-			return nil, fmt.Errorf("Outer Header Creation requires an IPv4 address")
+			return nil, fmt.Errorf("outer header creation requires an IPv4 address")
 		}
 		if descriptionOctet&0x0a != 0 &&
 			(header.Ipv6Address.To16() == nil || header.Ipv6Address.To4() != nil) {
-			return nil, fmt.Errorf("Outer Header Creation requires an IPv6 address")
+			return nil, fmt.Errorf("outer header creation requires an IPv6 address")
 		}
 		headerIE := ie.NewOuterHeaderCreation(
 			header.OuterHeaderCreationDescription,

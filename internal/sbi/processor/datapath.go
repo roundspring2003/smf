@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/wmnsk/go-pfcp/ie"
+	goPfcpMessage "github.com/wmnsk/go-pfcp/message"
+
 	nasie "github.com/free5gc/nas/ie"
 	"github.com/free5gc/openapi/mediatype/multipart"
 	"github.com/free5gc/openapi/models"
@@ -13,8 +16,6 @@ import (
 	"github.com/free5gc/smf/internal/logger"
 	pfcp_message "github.com/free5gc/smf/internal/pfcp/message"
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
-	"github.com/wmnsk/go-pfcp/ie"
-	goPfcpMessage "github.com/wmnsk/go-pfcp/message"
 )
 
 type PFCPState struct {
@@ -278,7 +279,7 @@ func applyCreatedPDRs(
 
 	for _, createdPDR := range createdPDRs {
 		if createdPDR == nil {
-			return fmt.Errorf("PFCP Session Establishment Response contains a nil Created PDR")
+			return fmt.Errorf("PFCP Session Establishment Response contains a nil created PDR")
 		}
 		children, err := createdPDR.CreatedPDR()
 		if err != nil {
@@ -294,7 +295,7 @@ func applyCreatedPDRs(
 			}
 		}
 		if pdrIDIE == nil {
-			return fmt.Errorf("Created PDR is missing PDR ID")
+			return fmt.Errorf("created PDR is missing PDR ID")
 		}
 		pdrID, err := pdrIDIE.PDRID()
 		if err != nil {
@@ -312,7 +313,7 @@ func applyCreatedPDRs(
 		}
 		pdr := pdrByID[pdrID]
 		if pdr == nil {
-			return fmt.Errorf("Created PDR refers to unknown PDR ID %d", pdrID)
+			return fmt.Errorf("created PDR refers to unknown PDR ID %d", pdrID)
 		}
 		pdr.PDI.LocalFTeid = &pfcptype.FTEID{
 			Chid:        fteid.HasChID(),
@@ -680,7 +681,10 @@ func (p *Processor) updateAnUpfPfcpSession(
 	}
 	cause, err := response.Cause.Cause()
 	if err != nil || cause != ie.CauseRequestAccepted {
-		logger.PduSessLog.Warnf("Received PFCP Session Modification Not Accepted Response from AN UPF: cause=%d err=%v", cause, err)
+		logger.PduSessLog.Warnf(
+			"Received PFCP Session Modification Not Accepted Response from AN UPF: cause=%d err=%v",
+			cause, err,
+		)
 		return smf_context.SessionUpdateFailed
 	}
 

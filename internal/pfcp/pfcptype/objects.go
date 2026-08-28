@@ -7,6 +7,7 @@
 package pfcptype
 
 import (
+	"context"
 	"encoding/binary"
 	"net"
 
@@ -43,11 +44,11 @@ func (n NodeID) ResolveNodeIdToIp() net.IP {
 	case NodeIdTypeIpv4Address, NodeIdTypeIpv6Address:
 		return n.IP
 	case NodeIdTypeFqdn:
-		addresses, err := net.LookupIP(n.FQDN)
+		addresses, err := net.DefaultResolver.LookupIPAddr(context.Background(), n.FQDN)
 		if err != nil || len(addresses) == 0 {
 			return net.IPv4zero
 		}
-		return addresses[0]
+		return addresses[0].IP
 	default:
 		return net.IPv4zero
 	}

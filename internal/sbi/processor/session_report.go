@@ -3,11 +3,11 @@ package processor
 import (
 	"fmt"
 
-	"github.com/free5gc/openapi/mediatype/multipart"
-	"github.com/free5gc/openapi/models"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
+	"github.com/free5gc/openapi/mediatype/multipart"
+	"github.com/free5gc/openapi/models"
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
 )

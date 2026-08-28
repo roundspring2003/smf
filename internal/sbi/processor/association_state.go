@@ -117,7 +117,10 @@ func (p *Processor) releaseAssociationRequestedByUPF(
 
 	client, ok := p.getActivePFCPClient().(associationReleasePFCPClient)
 	if !ok {
-		logger.PfcpLog.Errorf("cannot release association to UPF%s: active PFCP client does not support Association Release", upfString)
+		logger.PfcpLog.Errorf(
+			"cannot release association to UPF%s: active PFCP client does not support Association Release",
+			upfString,
+		)
 		cancelUPFAssociation(upf)
 		return
 	}

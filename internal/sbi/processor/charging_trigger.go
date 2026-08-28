@@ -3,11 +3,12 @@ package processor
 import (
 	"time"
 
+	"github.com/wmnsk/go-pfcp/ie"
+
 	"github.com/free5gc/openapi/models"
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/logger"
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
-	"github.com/wmnsk/go-pfcp/ie"
 )
 
 func (p *Processor) CreateChargingSession(smContext *smf_context.SMContext) {

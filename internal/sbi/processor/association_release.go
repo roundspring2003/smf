@@ -36,7 +36,10 @@ type associationReleasePDUSessionResult struct {
 // active PFCP/SBI operations bounded when one UPF owns many sessions.
 func (p *Processor) deletePFCPSessionsBeforeAssociationRelease(ctx context.Context, upf *smf_context.UPF) {
 	if err := ctx.Err(); err != nil {
-		logger.PfcpLog.Warnf("PDU Session termination before Association Release for UPF%s expired before collecting targets: %v", formatUPF(upf), err)
+		logger.PfcpLog.Warnf(
+			"PDU Session termination before Association Release for UPF%s expired before collecting targets: %v",
+			formatUPF(upf), err,
+		)
 		return
 	}
 	targets := upf.CollectAssociationReleasePDUSessions()
@@ -216,7 +219,10 @@ func (p *Processor) deleteAssociationPFCPSession(
 func (p *Processor) finalizeAssociationAffectedPDUSession(smContext *smf_context.SMContext) {
 	if p == nil || p.ProcessorSmf == nil {
 		// Unit tests may construct a Processor without the service/consumer.
-		logger.PfcpLog.Warnf("skip NF-side PDU Session finalization for SMContext[%s]: processor service is not configured", smContext.Ref)
+		logger.PfcpLog.Warnf(
+			"skip NF-side PDU Session finalization for SMContext[%s]: processor service is not configured",
+			smContext.Ref,
+		)
 		return
 	}
 

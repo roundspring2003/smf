@@ -61,7 +61,10 @@ func (s *PfcpServer) handleAssociationSetupRequest(
 	manager := s.associationState
 	s.associationMu.RUnlock()
 	if manager == nil {
-		s.log.Warnf("reject PFCP Association Setup Request from %s: association state manager is not configured", peer.String())
+		s.log.Warnf(
+			"reject PFCP Association Setup Request from %s: association state manager is not configured",
+			peer.String(),
+		)
 		response.Cause = ie.NewCause(ie.CauseRequestRejected)
 		return response, nil
 	}
@@ -107,7 +110,10 @@ func (s *PfcpServer) handleAssociationUpdateRequest(
 	manager := s.associationState
 	s.associationMu.RUnlock()
 	if manager == nil {
-		s.log.Warnf("reject PFCP Association Update Request from %s: association state manager is not configured", peer.String())
+		s.log.Warnf(
+			"reject PFCP Association Update Request from %s: association state manager is not configured",
+			peer.String(),
+		)
 		response.Cause = ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)
 		return response, nil
 	}
@@ -145,14 +151,14 @@ func validateAssociationUpdate(request *message.AssociationUpdateRequest) (uint8
 	if request.GracefulReleasePeriod != nil {
 		if request.PFCPAssociationReleaseRequest == nil {
 			return ie.CauseConditionalIEMissing,
-				fmt.Errorf("Graceful Release Period is present without PFCP Association Release Request IE")
+				fmt.Errorf("graceful release period is present without PFCP Association Release Request IE")
 		}
 		if _, err := request.GracefulReleasePeriod.GracefulReleasePeriod(); err != nil {
-			return ie.CauseInvalidLength, fmt.Errorf("Graceful Release Period IE: %w", err)
+			return ie.CauseInvalidLength, fmt.Errorf("graceful release period IE: %w", err)
 		}
 		if !releaseRequested && !usageReportsSent {
 			return ie.CauseRequestRejected,
-				fmt.Errorf("Graceful Release Period is present but neither SARR nor URSS is set")
+				fmt.Errorf("graceful release period is present but neither SARR nor URSS is set")
 		}
 	}
 	if request.PFCPAUReqFlags != nil {
@@ -288,14 +294,14 @@ func (s *PfcpServer) localNodeIDIE() *ie.IE {
 
 func nodeIDFromIE(nodeIDIE *ie.IE) (pfcptype.NodeID, error) {
 	if nodeIDIE == nil {
-		return pfcptype.NodeID{}, fmt.Errorf("Node ID IE is missing")
+		return pfcptype.NodeID{}, fmt.Errorf("node ID IE is missing")
 	}
 	value, err := nodeIDIE.NodeID()
 	if err != nil {
 		return pfcptype.NodeID{}, err
 	}
 	if len(nodeIDIE.Payload) == 0 {
-		return pfcptype.NodeID{}, fmt.Errorf("Node ID payload is empty")
+		return pfcptype.NodeID{}, fmt.Errorf("node ID payload is empty")
 	}
 	switch nodeIDIE.Payload[0] {
 	case ie.NodeIDIPv4Address:

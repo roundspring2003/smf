@@ -21,7 +21,7 @@ func (s *PfcpServer) SetSessionReportHandler(handler SessionReportHandler) {
 func (s *PfcpServer) handleSessionReportRequest(
 	request *message.SessionReportRequest,
 ) *message.SessionReportResponse {
-	cause := uint8(ie.CauseServiceNotSupported)
+	cause := ie.CauseServiceNotSupported
 	remoteSEID := uint64(0)
 
 	s.sessionReportMu.RLock()
