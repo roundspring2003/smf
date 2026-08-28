@@ -29,10 +29,7 @@ func (s *PfcpServer) Dispatch(msg message.Message, addr *net.UDPAddr) {
 	case *message.AssociationReleaseRequest:
 		response = s.handleAssociationReleaseRequest(request)
 	case *message.AssociationUpdateRequest:
-		// TODO(go-pfcp migration): validate mandatory IEs, update association
-		// state and return an Association Update Response with an appropriate Cause.
-		s.log.Warnf("PFCP Association Update Request handling is not implemented (sequence=%#x from=%v)",
-			request.Sequence(), addr)
+		response, afterResponse = s.handleAssociationUpdateRequest(request)
 	case *message.NodeReportRequest:
 		// TODO(go-pfcp migration): parse Node Report Type and the report-specific
 		// grouped IEs before returning a Node Report Response.

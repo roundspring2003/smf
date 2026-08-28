@@ -1,6 +1,7 @@
 package pfcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -31,7 +32,7 @@ func TestSendHeartbeatRequest(t *testing.T) {
 		), nil
 	})
 
-	response, err := s.SendHeartbeatRequest(peerAddr)
+	response, err := s.SendHeartbeatRequest(context.Background(), peerAddr)
 	if err != nil {
 		t.Fatalf("SendHeartbeatRequest() error: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestSendHeartbeatRequestRejectsMissingRecoveryTimeStamp(t *testing.T) {
 		return message.NewHeartbeatResponse(req.Sequence(), nil), nil
 	})
 
-	_, err := s.SendHeartbeatRequest(peerAddr)
+	_, err := s.SendHeartbeatRequest(context.Background(), peerAddr)
 	if err == nil || !strings.Contains(err.Error(), "missing Recovery Time Stamp") {
 		t.Fatalf("SendHeartbeatRequest() error = %v, want missing Recovery Time Stamp", err)
 	}
@@ -68,7 +69,7 @@ func TestSendHeartbeatRequestRejectsUnexpectedResponse(t *testing.T) {
 		return message.NewAssociationUpdateResponse(req.Sequence()), nil
 	})
 
-	_, err := s.SendHeartbeatRequest(peerAddr)
+	_, err := s.SendHeartbeatRequest(context.Background(), peerAddr)
 	if err == nil || !strings.Contains(err.Error(), "unexpected response") {
 		t.Fatalf("SendHeartbeatRequest() error = %v, want unexpected response", err)
 	}
@@ -81,7 +82,7 @@ func TestSendHeartbeatRequestTimeout(t *testing.T) {
 	s, _ := startTestPfcpServer(t)
 	blackHole := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
 
-	_, err := s.SendHeartbeatRequest(blackHole)
+	_, err := s.SendHeartbeatRequest(context.Background(), blackHole)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("SendHeartbeatRequest() error = %v, want timeout", err)
 	}
@@ -93,7 +94,7 @@ func TestSendHeartbeatRequestRejectsStoppedServer(t *testing.T) {
 	wg.Wait()
 
 	peer := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: PfcpPort}
-	_, err := s.SendHeartbeatRequest(peer)
+	_, err := s.SendHeartbeatRequest(context.Background(), peer)
 	if err == nil || !strings.Contains(err.Error(), "server is stopped") {
 		t.Fatalf("SendHeartbeatRequest() error = %v, want server stopped", err)
 	}
@@ -102,7 +103,7 @@ func TestSendHeartbeatRequestRejectsStoppedServer(t *testing.T) {
 func TestSendHeartbeatRequestRejectsUnspecifiedDestination(t *testing.T) {
 	s := NewPfcpServer(nil, "127.0.0.1")
 	for _, addr := range []*net.UDPAddr{nil, {IP: net.IPv4zero, Port: PfcpPort}} {
-		if _, err := s.SendHeartbeatRequest(addr); err == nil {
+		if _, err := s.SendHeartbeatRequest(context.Background(), addr); err == nil {
 			t.Fatalf("SendHeartbeatRequest(%v) succeeded, want destination error", addr)
 		}
 	}

@@ -1,6 +1,7 @@
 package pfcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 
@@ -13,6 +14,7 @@ import (
 // valid protocol result and is returned to the processor; malformed responses
 // are transport/protocol errors.
 func (s *PfcpServer) SendSessionEstablishmentRequest(
+	ctx context.Context,
 	request *message.SessionEstablishmentRequest,
 	addr *net.UDPAddr,
 	localSEID uint64,
@@ -30,7 +32,7 @@ func (s *PfcpServer) SendSessionEstablishmentRequest(
 		return nil, fmt.Errorf("send PFCP Session Establishment Request: local SEID is zero")
 	}
 
-	received, err := s.SendRequest(request, addr)
+	received, err := s.sendRequest(ctx, request, addr)
 	if err != nil {
 		return nil, fmt.Errorf("PFCP Session Establishment Request to %v: %w", addr, err)
 	}
@@ -81,6 +83,7 @@ func (s *PfcpServer) SendSessionEstablishmentRequest(
 // Request through the server-owned transaction layer. A rejected response is
 // returned to the processor as a valid protocol result.
 func (s *PfcpServer) SendSessionModificationRequest(
+	ctx context.Context,
 	request *message.SessionModificationRequest,
 	addr *net.UDPAddr,
 	localSEID uint64,
@@ -101,7 +104,7 @@ func (s *PfcpServer) SendSessionModificationRequest(
 		return nil, fmt.Errorf("send PFCP Session Modification Request: local SEID is zero")
 	}
 
-	received, err := s.SendRequest(request, addr)
+	received, err := s.sendRequest(ctx, request, addr)
 	if err != nil {
 		return nil, fmt.Errorf("PFCP Session Modification Request to %v: %w", addr, err)
 	}
@@ -134,6 +137,7 @@ func (s *PfcpServer) SendSessionModificationRequest(
 // Request through the server-owned transaction layer. The request targets the
 // UPF SEID, while the response must identify the matching CP-local SEID.
 func (s *PfcpServer) SendSessionDeletionRequest(
+	ctx context.Context,
 	request *message.SessionDeletionRequest,
 	addr *net.UDPAddr,
 	localSEID uint64,
@@ -154,7 +158,7 @@ func (s *PfcpServer) SendSessionDeletionRequest(
 		return nil, fmt.Errorf("send PFCP Session Deletion Request: local SEID is zero")
 	}
 
-	received, err := s.SendRequest(request, addr)
+	received, err := s.sendRequest(ctx, request, addr)
 	if err != nil {
 		return nil, fmt.Errorf("PFCP Session Deletion Request to %v: %w", addr, err)
 	}

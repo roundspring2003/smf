@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -27,19 +28,19 @@ type PFCPState struct {
 
 type SessionEstablishmentPFCPClient interface {
 	SendSessionEstablishmentRequest(
-		*goPfcpMessage.SessionEstablishmentRequest, *net.UDPAddr, uint64,
+		context.Context, *goPfcpMessage.SessionEstablishmentRequest, *net.UDPAddr, uint64,
 	) (*goPfcpMessage.SessionEstablishmentResponse, error)
 }
 
 type SessionModificationPFCPClient interface {
 	SendSessionModificationRequest(
-		*goPfcpMessage.SessionModificationRequest, *net.UDPAddr, uint64,
+		context.Context, *goPfcpMessage.SessionModificationRequest, *net.UDPAddr, uint64,
 	) (*goPfcpMessage.SessionModificationResponse, error)
 }
 
 type SessionDeletionPFCPClient interface {
 	SendSessionDeletionRequest(
-		*goPfcpMessage.SessionDeletionRequest, *net.UDPAddr, uint64,
+		context.Context, *goPfcpMessage.SessionDeletionRequest, *net.UDPAddr, uint64,
 	) (*goPfcpMessage.SessionDeletionResponse, error)
 }
 
@@ -181,10 +182,12 @@ func (p *Processor) establishPfcpSession(
 		fail(fmt.Errorf("PFCP Session Establishment has no target UPF"))
 		return
 	}
-	if err := state.upf.IsAssociated(); err != nil {
+	associationContext, finishSessionWork, err := state.upf.BeginSessionWork()
+	if err != nil {
 		fail(err)
 		return
 	}
+	defer finishSessionWork()
 
 	nodeIP := state.upf.NodeID.ResolveNodeIdToIp()
 	nodeIPString := nodeIP.String()
@@ -209,7 +212,7 @@ func (p *Processor) establishPfcpSession(
 		return
 	}
 	response, err := client.SendSessionEstablishmentRequest(
-		request,
+		associationContext, request,
 		&net.UDPAddr{IP: nodeIP, Port: pfcpPeerPort},
 		sessionContext.LocalSEID,
 	)
@@ -393,7 +396,8 @@ func (p *Processor) deleteEstablishedPfcpSession(
 	localSEID uint64,
 	remoteSEID uint64,
 ) error {
-	if err := upf.IsAssociated(); err != nil {
+	associationContext, err := upf.AssociationContext()
+	if err != nil {
 		return err
 	}
 	client, ok := p.getActivePFCPClient().(SessionDeletionPFCPClient)
@@ -402,7 +406,7 @@ func (p *Processor) deleteEstablishedPfcpSession(
 	}
 	request := goPfcpMessage.NewSessionDeletionRequest(0, 0, remoteSEID, 0, 0)
 	response, err := client.SendSessionDeletionRequest(
-		request,
+		associationContext, request,
 		&net.UDPAddr{IP: upf.NodeID.ResolveNodeIdToIp(), Port: pfcpPeerPort},
 		localSEID,
 	)
@@ -429,9 +433,12 @@ func (p *Processor) sendSessionModificationRequest(
 	if state == nil || state.upf == nil {
 		return nil, fmt.Errorf("PFCP Session Modification has no target UPF")
 	}
-	if err := state.upf.IsAssociated(); err != nil {
+	associationContext, finishSessionWork, err := state.upf.BeginSessionWork()
+	if err != nil {
 		return nil, err
 	}
+	defer finishSessionWork()
+
 	nodeIP := state.upf.NodeID.ResolveNodeIdToIp()
 	nodeIPString := nodeIP.String()
 	sessionContext := smContext.PFCPContext[nodeIPString]
@@ -450,7 +457,7 @@ func (p *Processor) sendSessionModificationRequest(
 		return nil, fmt.Errorf("go-pfcp Session Modification client is not configured")
 	}
 	response, err := client.SendSessionModificationRequest(
-		request,
+		associationContext, request,
 		&net.UDPAddr{IP: nodeIP, Port: pfcpPeerPort},
 		sessionContext.LocalSEID,
 	)
@@ -758,7 +765,7 @@ func (p *Processor) ReleaseDcTunnel(smContext *smf_context.SMContext) []SendPfcp
 
 func (p *Processor) deletePfcpSession(
 	upf *smf_context.UPF,
-	ctx *smf_context.SMContext,
+	smContext *smf_context.SMContext,
 	resCh chan<- SendPfcpResult,
 ) {
 	logger.PduSessLog.Infoln("Sending PFCP Session Deletion Request")
@@ -766,17 +773,25 @@ func (p *Processor) deletePfcpSession(
 		resCh <- SendPfcpResult{Status: smf_context.SessionReleaseFailed, Err: fmt.Errorf("nil UPF")}
 		return
 	}
-	if err := upf.IsAssociated(); err != nil {
+	associationContext, err := upf.AssociationContext()
+	if err != nil {
 		resCh <- SendPfcpResult{Status: smf_context.SessionReleaseFailed, Err: err}
 		return
 	}
 	nodeIP := upf.NodeID.ResolveNodeIdToIp()
-	sessionContext := ctx.PFCPContext[nodeIP.String()]
+	sessionContext := smContext.PFCPContext[nodeIP.String()]
 	if sessionContext == nil {
 		resCh <- SendPfcpResult{
 			Status: smf_context.SessionReleaseFailed,
 			Err:    fmt.Errorf("PFCP session context for UPF %s does not exist", nodeIP),
 		}
+		return
+	}
+	if sessionContext.RemoteSEID == 0 {
+		// A concurrent association-triggered release already deleted this PFCP
+		// session. Treat it as idempotent success and let the caller retry only
+		// the remaining live sessions.
+		resCh <- SendPfcpResult{Status: smf_context.SessionReleaseSuccess}
 		return
 	}
 	client, ok := p.getActivePFCPClient().(SessionDeletionPFCPClient)
@@ -789,7 +804,7 @@ func (p *Processor) deletePfcpSession(
 	}
 	request := goPfcpMessage.NewSessionDeletionRequest(0, 0, sessionContext.RemoteSEID, 0, 0)
 	response, err := client.SendSessionDeletionRequest(
-		request,
+		associationContext, request,
 		&net.UDPAddr{IP: nodeIP, Port: pfcpPeerPort},
 		sessionContext.LocalSEID,
 	)
@@ -821,10 +836,14 @@ func (p *Processor) deletePfcpSession(
 	}
 
 	logger.PduSessLog.Info("Received PFCP Session Deletion Accepted Response")
-	resCh <- SendPfcpResult{Status: smf_context.SessionReleaseSuccess}
+	// The UPF has already deleted the PFCP session. Clear its remote SEID before
+	// notifying the caller, and consume final reports first so subsequent SM
+	// context cleanup cannot race report accounting or send a duplicate delete.
+	sessionContext.RemoteSEID = 0
 	if len(response.UsageReport) != 0 {
-		if err = ctx.HandleReports(response.UsageReport, upf.NodeID, ""); err != nil {
+		if err = smContext.HandleReports(response.UsageReport, upf.NodeID, ""); err != nil {
 			logger.PduSessLog.Errorf("decode PFCP Session Deletion Usage Report: %v", err)
 		}
 	}
+	resCh <- SendPfcpResult{Status: smf_context.SessionReleaseSuccess}
 }

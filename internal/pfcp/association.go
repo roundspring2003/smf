@@ -1,6 +1,7 @@
 package pfcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -16,6 +17,7 @@ import (
 // and return any restart-recovery work as afterResponse.
 type AssociationStateManager interface {
 	SetupAssociation(peer pfcptype.NodeID, recoveryTime time.Time) (cause uint8, afterResponse func())
+	UpdateAssociation(peer pfcptype.NodeID, request *message.AssociationUpdateRequest) (cause uint8, afterResponse func())
 	ReleaseAssociation(peer pfcptype.NodeID) (cause uint8)
 }
 
@@ -72,6 +74,95 @@ func (s *PfcpServer) handleAssociationSetupRequest(
 	return response, afterResponse
 }
 
+func (s *PfcpServer) handleAssociationUpdateRequest(
+	request *message.AssociationUpdateRequest,
+) (*message.AssociationUpdateResponse, func()) {
+	responseIEs := []*ie.IE{
+		ie.NewCause(ie.CauseMandatoryIEMissing),
+		ie.NewCPFunctionFeatures(0),
+	}
+	if localNodeID := s.localNodeIDIE(); localNodeID != nil {
+		responseIEs = append([]*ie.IE{localNodeID}, responseIEs...)
+	}
+	response := message.NewAssociationUpdateResponse(request.Sequence(), responseIEs...)
+	if request.NodeID == nil {
+		s.log.Warn("PFCP Association Update Request is missing Node ID")
+		return response, nil
+	}
+
+	peer, err := nodeIDFromIE(request.NodeID)
+	if err != nil {
+		s.log.Warnf("decode PFCP Association Update Request Node ID: %v", err)
+		response.Cause = ie.NewCause(ie.CauseMandatoryIEIncorrect)
+		return response, nil
+	}
+	cause, err := validateAssociationUpdate(request)
+	if err != nil {
+		s.log.Warnf("decode PFCP Association Update Request from %s: %v", peer.String(), err)
+		response.Cause = ie.NewCause(cause)
+		return response, nil
+	}
+
+	s.associationMu.RLock()
+	manager := s.associationState
+	s.associationMu.RUnlock()
+	if manager == nil {
+		s.log.Warnf("reject PFCP Association Update Request from %s: association state manager is not configured", peer.String())
+		response.Cause = ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)
+		return response, nil
+	}
+
+	cause, afterResponse := manager.UpdateAssociation(peer, request)
+	response.Cause = ie.NewCause(cause)
+	if cause != ie.CauseRequestAccepted {
+		return response, nil
+	}
+	return response, afterResponse
+}
+
+func validateAssociationUpdate(request *message.AssociationUpdateRequest) (uint8, error) {
+	if request == nil {
+		return ie.CauseRequestRejected, fmt.Errorf("nil PFCP Association Update Request")
+	}
+	if request.UPFunctionFeatures != nil {
+		features, err := request.UPFunctionFeatures.UPFunctionFeatures()
+		if err != nil || len(features) < 2 {
+			if err == nil {
+				err = fmt.Errorf("UP Function Features payload is too short: %d", len(features))
+			}
+			return ie.CauseInvalidLength, err
+		}
+	}
+
+	var releaseRequested, usageReportsSent bool
+	if request.PFCPAssociationReleaseRequest != nil {
+		if _, err := request.PFCPAssociationReleaseRequest.PFCPAssociationReleaseRequest(); err != nil {
+			return ie.CauseInvalidLength, fmt.Errorf("PFCP Association Release Request IE: %w", err)
+		}
+		releaseRequested = request.PFCPAssociationReleaseRequest.HasSARR()
+		usageReportsSent = request.PFCPAssociationReleaseRequest.HasURSS()
+	}
+	if request.GracefulReleasePeriod != nil {
+		if request.PFCPAssociationReleaseRequest == nil {
+			return ie.CauseConditionalIEMissing,
+				fmt.Errorf("Graceful Release Period is present without PFCP Association Release Request IE")
+		}
+		if _, err := request.GracefulReleasePeriod.GracefulReleasePeriod(); err != nil {
+			return ie.CauseInvalidLength, fmt.Errorf("Graceful Release Period IE: %w", err)
+		}
+		if !releaseRequested && !usageReportsSent {
+			return ie.CauseRequestRejected,
+				fmt.Errorf("Graceful Release Period is present but neither SARR nor URSS is set")
+		}
+	}
+	if request.PFCPAUReqFlags != nil {
+		if _, err := request.PFCPAUReqFlags.PFCPAUReqFlags(); err != nil {
+			return ie.CauseInvalidLength, fmt.Errorf("PFCPAUReq-Flags IE: %w", err)
+		}
+	}
+	return ie.CauseRequestAccepted, nil
+}
+
 func (s *PfcpServer) handleAssociationReleaseRequest(
 	request *message.AssociationReleaseRequest,
 ) *message.AssociationReleaseResponse {
@@ -107,6 +198,7 @@ func (s *PfcpServer) handleAssociationReleaseRequest(
 // It validates protocol-level mandatory IEs and returns only an accepted
 // concrete response. The caller owns the UPF association state transition.
 func (s *PfcpServer) SendAssociationSetupRequest(
+	ctx context.Context,
 	addr *net.UDPAddr,
 ) (*message.AssociationSetupResponse, error) {
 	if err := validateAssociationDestination(s, addr); err != nil {
@@ -118,7 +210,7 @@ func (s *PfcpServer) SendAssociationSetupRequest(
 		ie.NewRecoveryTimeStamp(s.RecoveryTime()),
 		ie.NewCPFunctionFeatures(0),
 	)
-	received, err := s.sendAssociationRequest(request, addr)
+	received, err := s.sendRequest(ctx, request, addr)
 	if err != nil {
 		return nil, fmt.Errorf("PFCP Association Setup Request to %v: %w", addr, err)
 	}
@@ -142,13 +234,14 @@ func (s *PfcpServer) SendAssociationSetupRequest(
 }
 
 func (s *PfcpServer) SendAssociationReleaseRequest(
+	ctx context.Context,
 	addr *net.UDPAddr,
 ) (*message.AssociationReleaseResponse, error) {
 	if err := validateAssociationDestination(s, addr); err != nil {
 		return nil, err
 	}
 	request := message.NewAssociationReleaseRequest(0, s.localNodeIDIE())
-	received, err := s.sendAssociationRequest(request, addr)
+	received, err := s.sendRequest(ctx, request, addr)
 	if err != nil {
 		return nil, fmt.Errorf("PFCP Association Release Request to %v: %w", addr, err)
 	}
@@ -163,25 +256,6 @@ func (s *PfcpServer) SendAssociationReleaseRequest(
 		return nil, fmt.Errorf("PFCP Association Release Response from %v: %w", addr, err)
 	}
 	return response, nil
-}
-
-func (s *PfcpServer) sendAssociationRequest(request message.Message, addr *net.UDPAddr) (message.Message, error) {
-	responseChannel := s.SendPfcpMsg(request, addr)
-	if responseChannel == nil {
-		return nil, fmt.Errorf("PFCP server is stopped")
-	}
-	select {
-	case <-s.stopCh:
-		return nil, fmt.Errorf("PFCP server is stopped")
-	case received, ok := <-responseChannel:
-		if !ok || received.Msg == nil {
-			if isServerStopped(s.stopCh) {
-				return nil, fmt.Errorf("PFCP server is stopped")
-			}
-			return nil, fmt.Errorf("transaction timed out")
-		}
-		return received.Msg, nil
-	}
 }
 
 func validateAssociationDestination(s *PfcpServer, addr *net.UDPAddr) error {

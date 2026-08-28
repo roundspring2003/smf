@@ -1,17 +1,21 @@
 package processor
 
 import (
+	"context"
+	"net"
 	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
+	"github.com/wmnsk/go-pfcp/message"
 
 	smf_context "github.com/free5gc/smf/internal/context"
+	"github.com/free5gc/smf/internal/logger"
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 )
 
 // SetupAssociation adapts the new passive Association handler to the existing
 // configured UPF registry. Active Association/Heartbeat remains the authority
-// that creates the long-lived AssociationContext and detects UPF restart.
+// that drives the UPF association lifecycle and detects UPF restart.
 func (p *Processor) SetupAssociation(
 	peer pfcptype.NodeID,
 	_ time.Time,
@@ -20,6 +24,113 @@ func (p *Processor) SetupAssociation(
 		return ie.CauseRequestRejected, nil
 	}
 	return ie.CauseRequestAccepted, nil
+}
+
+// UpdateAssociation applies an update only to an association that is currently
+// established. Release work is deferred until the Update Response has been sent.
+func (p *Processor) UpdateAssociation(
+	peer pfcptype.NodeID,
+	request *message.AssociationUpdateRequest,
+) (uint8, func()) {
+	if request == nil {
+		return ie.CauseRequestRejected, nil
+	}
+	upf := smf_context.RetrieveUPFNodeByNodeID(peer)
+	if upf == nil || upf.IsAssociated() != nil {
+		return ie.CauseNoEstablishedPFCPAssociation, nil
+	}
+	if request.UPFunctionFeatures != nil {
+		features, err := request.UPFunctionFeatures.UPFunctionFeatures()
+		if err != nil || len(features) < 2 {
+			return ie.CauseInvalidLength, nil
+		}
+		upf.SetUPFunctionFeatures(features)
+	}
+	if request.PFCPAUReqFlags != nil && request.PFCPAUReqFlags.HasPARPS() {
+		logger.PfcpLog.Warnf(
+			"UPF[%s] requested enhanced PFCP association release preparation, but SMF does not advertise EPFAR",
+			peer.String(),
+		)
+	}
+
+	releaseRequest := request.PFCPAssociationReleaseRequest
+	if releaseRequest == nil {
+		return ie.CauseRequestAccepted, nil
+	}
+	if releaseRequest.HasURSS() {
+		logger.PfcpLog.Infof(
+			"UPF[%s] reported that non-zero Usage Reports for affected PFCP Sessions were sent",
+			peer.String(),
+		)
+	}
+	// URSS reports what the UPF has already sent; only SARR requests release.
+	if !releaseRequest.HasSARR() {
+		return ie.CauseRequestAccepted, nil
+	}
+
+	var gracefulReleasePeriod *time.Duration
+	if request.GracefulReleasePeriod != nil {
+		period, err := request.GracefulReleasePeriod.GracefulReleasePeriod()
+		if err != nil {
+			return ie.CauseInvalidLength, nil
+		}
+		gracefulReleasePeriod = &period
+	}
+	return ie.CauseRequestAccepted, func() {
+		p.releaseAssociationRequestedByUPF(upf, gracefulReleasePeriod)
+	}
+}
+
+type associationReleasePFCPClient interface {
+	SendAssociationReleaseRequest(
+		context.Context, *net.UDPAddr,
+	) (*message.AssociationReleaseResponse, error)
+}
+
+func (p *Processor) releaseAssociationRequestedByUPF(
+	upf *smf_context.UPF,
+	gracefulReleasePeriod *time.Duration,
+) {
+	upfString := formatUPF(upf)
+	pfcpContext := smf_context.GetSelf().PfcpContext
+	if pfcpContext == nil {
+		logger.PfcpLog.Errorf("cannot release association to UPF%s: SMF PFCP context is not configured", upfString)
+		cancelUPFAssociation(upf)
+		return
+	}
+	// The UPF-provided graceful period covers the complete preparation phase,
+	// including waiting for PFCP session work that was already in flight.
+	releaseContext, cancelRelease := associationReleaseContext(pfcpContext, gracefulReleasePeriod)
+	defer cancelRelease()
+	if !upf.BeginAssociationRelease() {
+		logger.PfcpLog.Infof("PFCP Association Release for UPF%s is already in progress", upfString)
+		return
+	}
+	associationContext, err := upf.AssociationContext()
+	if err != nil {
+		logger.PfcpLog.Errorf("cannot release association to UPF%s: %v", upfString, err)
+		cancelUPFAssociation(upf)
+		return
+	}
+
+	p.deletePFCPSessionsBeforeAssociationRelease(releaseContext, upf)
+
+	client, ok := p.getActivePFCPClient().(associationReleasePFCPClient)
+	if !ok {
+		logger.PfcpLog.Errorf("cannot release association to UPF%s: active PFCP client does not support Association Release", upfString)
+		cancelUPFAssociation(upf)
+		return
+	}
+	_, err = client.SendAssociationReleaseRequest(associationContext, &net.UDPAddr{
+		IP:   upf.NodeID.ResolveNodeIdToIp(),
+		Port: pfcpPeerPort,
+	})
+	if err != nil {
+		logger.PfcpLog.Errorf("PFCP Association Release Request to UPF%s failed: %v", upfString, err)
+	}
+	// A lost response leaves the peer's state ambiguous. Invalidate the local
+	// association on both success and failure so no new sessions use this UPF.
+	cancelUPFAssociation(upf)
 }
 
 // ReleaseAssociation invalidates the existing association without deleting the

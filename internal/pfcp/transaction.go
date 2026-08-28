@@ -1,6 +1,7 @@
 package pfcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"runtime/debug"
@@ -17,6 +18,7 @@ type RcvPfcpMsg struct {
 }
 
 type TransmitMessage struct {
+	Context    context.Context
 	Msg        message.Message
 	RemoteAddr *net.UDPAddr
 	TrType     TransType
@@ -39,6 +41,7 @@ type TxTransaction struct {
 	timer           *time.Timer
 	timerGeneration uint64
 	retransCount    uint8
+	stopContext     func() bool
 	done            bool
 }
 
@@ -98,6 +101,23 @@ func (s *PfcpServer) deleteTxTransaction(tx *TxTransaction) {
 	}
 }
 
+func (tx *TxTransaction) watchContext(ctx context.Context) {
+	if ctx == nil || ctx.Done() == nil {
+		return
+	}
+	stop := context.AfterFunc(ctx, func() {
+		tx.complete(RcvPfcpMsg{Msg: nil})
+	})
+	tx.mu.Lock()
+	if tx.done {
+		tx.mu.Unlock()
+		stop()
+		return
+	}
+	tx.stopContext = stop
+	tx.mu.Unlock()
+}
+
 func (tx *TxTransaction) send(request message.Message) error {
 	request.SetSequenceNumber(tx.seq)
 	packet := make([]byte, request.MarshalLen())
@@ -123,6 +143,7 @@ func (tx *TxTransaction) send(request message.Message) error {
 
 func (tx *TxTransaction) complete(notification RcvPfcpMsg) {
 	var response chan RcvPfcpMsg
+	var stopContext func() bool
 	func() {
 		tx.mu.Lock()
 		defer tx.mu.Unlock()
@@ -131,10 +152,15 @@ func (tx *TxTransaction) complete(notification RcvPfcpMsg) {
 		}
 		tx.done = true
 		tx.invalidateTimerLocked()
+		stopContext = tx.stopContext
+		tx.stopContext = nil
 		response = tx.rspCh
 		tx.rspCh = nil
 	}()
 
+	if stopContext != nil {
+		stopContext()
+	}
 	tx.server.deleteTxTransaction(tx)
 	if response != nil {
 		response <- notification

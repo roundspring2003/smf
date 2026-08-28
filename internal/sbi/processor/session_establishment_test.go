@@ -73,18 +73,19 @@ type fakeRollbackPFCPClient struct {
 }
 
 func (f *fakeRollbackPFCPClient) SendAssociationSetupRequest(
-	*net.UDPAddr,
+	stdcontext.Context, *net.UDPAddr,
 ) (*message.AssociationSetupResponse, error) {
 	panic("unexpected Association Setup")
 }
 
 func (f *fakeRollbackPFCPClient) SendHeartbeatRequest(
-	*net.UDPAddr,
+	stdcontext.Context, *net.UDPAddr,
 ) (*message.HeartbeatResponse, error) {
 	panic("unexpected Heartbeat")
 }
 
 func (f *fakeRollbackPFCPClient) SendSessionDeletionRequest(
+	_ stdcontext.Context,
 	request *message.SessionDeletionRequest,
 	addr *net.UDPAddr,
 	localSEID uint64,
@@ -93,13 +94,14 @@ func (f *fakeRollbackPFCPClient) SendSessionDeletionRequest(
 }
 
 func rollbackTestUPF(ip string) *context.UPF {
-	return &context.UPF{
+	upf := &context.UPF{
 		NodeID: pfcptype.NodeID{
 			NodeIdType: pfcptype.NodeIdTypeIpv4Address,
 			IP:         net.ParseIP(ip).To4(),
 		},
-		AssociationContext: stdcontext.Background(),
 	}
+	upf.EstablishAssociation(stdcontext.Background())
+	return upf
 }
 
 func TestWaitAllPfcpRspReportsFailureWithoutCallback(t *testing.T) {

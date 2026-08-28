@@ -424,7 +424,7 @@ func TestHandlePDUSessionSMContextCreate(t *testing.T) {
 	// modify associate setup status
 	allUPFs := smf_context.GetSelf().UserPlaneInformation.UPFs
 	for _, upfNode := range allUPFs {
-		upfNode.UPF.AssociationContext = context.Background()
+		upfNode.UPF.EstablishAssociation(context.Background())
 	}
 
 	testCases := []struct {
@@ -638,7 +638,7 @@ func TestHandlePDUSessionSMContextCreate_InvalidDnnSnssaiInputs(t *testing.T) {
 
 	allUPFs := smf_context.GetSelf().UserPlaneInformation.UPFs
 	for _, upfNode := range allUPFs {
-		upfNode.UPF.AssociationContext = context.Background()
+		upfNode.UPF.EstablishAssociation(context.Background())
 	}
 
 	type input struct {

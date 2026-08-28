@@ -61,6 +61,10 @@ func (p *Processor) UpdateChargingSession(
 }
 
 func (p *Processor) ReleaseChargingSession(smContext *smf_context.SMContext) {
+	if !smContext.BeginChargingRelease() {
+		logger.ChargingLog.Debugf("Charging Data Request[Termination] already started for SMContext[%s]", smContext.Ref)
+		return
+	}
 	multipleUnitUsage := buildMultiUnitUsageFromUsageReport(smContext)
 
 	_, problemDetails, err := p.Consumer().SendConvergedChargingRequest(smContext,

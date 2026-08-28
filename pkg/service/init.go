@@ -102,10 +102,6 @@ func NewApp(
 
 	smf.ctx, smf.cancel = context.WithCancel(ctx)
 
-	// for PFCP
-	smfContext := smf_context.GetSelf()
-	smfContext.PfcpContext, smfContext.PfcpCancelFunc = context.WithCancel(smf.ctx)
-
 	SMF = smf
 
 	return smf, nil

@@ -214,6 +214,9 @@ type SMContext struct {
 	// Each PDU session has a unique charging id
 	ChargingID    int32
 	RequestedUnit int32
+
+	chargingReleaseMu   sync.Mutex
+	chargingReleaseDone bool
 	// key = urrid
 	// All urr can map to a rating group
 	// However, a rating group may map to more than one urr
@@ -485,6 +488,19 @@ func (smContext *SMContext) CheckState(state SMContextState) bool {
 
 func (smContext *SMContext) State() SMContextState {
 	return SMContextState(atomic.LoadUint32((*uint32)(&smContext.state)))
+}
+
+// BeginChargingRelease elects exactly one caller to send the CHF termination
+// request. Association-triggered release can race a later AMF/UE completion,
+// but a charging session must be terminated only once.
+func (smContext *SMContext) BeginChargingRelease() bool {
+	smContext.chargingReleaseMu.Lock()
+	defer smContext.chargingReleaseMu.Unlock()
+	if smContext.chargingReleaseDone {
+		return false
+	}
+	smContext.chargingReleaseDone = true
+	return true
 }
 
 func (smContext *SMContext) GetNodeIDByLocalSEID(seid uint64) pfcptype.NodeID {

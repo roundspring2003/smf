@@ -334,10 +334,11 @@ func (t *Tls) validate() (bool, error) {
 }
 
 type PFCP struct {
-	ListenAddr          string `yaml:"listenAddr,omitempty" valid:"host,required"`
-	ExternalAddr        string `yaml:"externalAddr,omitempty" valid:"host,required"`
-	NodeID              string `yaml:"nodeID,omitempty" valid:"host,required"`
-	DispatchWorkerCount uint16 `yaml:"dispatchWorkerCount,omitempty" valid:"optional"`
+	ListenAddr                    string `yaml:"listenAddr,omitempty" valid:"host,required"`
+	ExternalAddr                  string `yaml:"externalAddr,omitempty" valid:"host,required"`
+	NodeID                        string `yaml:"nodeID,omitempty" valid:"host,required"`
+	DispatchWorkerCount           uint16 `yaml:"dispatchWorkerCount,omitempty" valid:"optional"`
+	AssociationReleaseWorkerCount uint16 `yaml:"associationReleaseWorkerCount,omitempty" valid:"optional"`
 	// interval at which PFCP Association Setup error messages are output.
 	AssocFailAlertInterval time.Duration `yaml:"assocFailAlertInterval,omitempty" valid:"type(time.Duration),optional"`
 	AssocFailRetryInterval time.Duration `yaml:"assocFailRetryInterval,omitempty" valid:"type(time.Duration),optional"`
@@ -345,10 +346,12 @@ type PFCP struct {
 }
 
 const (
-	PfcpDefaultRetransTimeout  = 3 * time.Second
-	PfcpDefaultMaxRetrans      = uint8(3)
-	PfcpDefaultDispatchWorkers = 64
-	PfcpMaximumDispatchWorkers = 1024
+	PfcpDefaultRetransTimeout            = 3 * time.Second
+	PfcpDefaultMaxRetrans                = uint8(3)
+	PfcpDefaultDispatchWorkers           = 64
+	PfcpMaximumDispatchWorkers           = 1024
+	PfcpDefaultAssociationReleaseWorkers = 4
+	PfcpMaximumAssociationReleaseWorkers = 64
 )
 
 // GetPfcpRetransTimer returns the transport defaults used for PFCP requests.
@@ -371,10 +374,27 @@ func (c *Config) GetPfcpDispatchWorkerCount() int {
 	return workers
 }
 
+// GetPfcpAssociationReleaseWorkerCount returns the maximum number of PFCP
+// Session Deletion requests one Association Release may execute concurrently.
+func (c *Config) GetPfcpAssociationReleaseWorkerCount() int {
+	if c == nil || c.Configuration == nil || c.Configuration.PFCP == nil {
+		return PfcpDefaultAssociationReleaseWorkers
+	}
+	workers := int(c.Configuration.PFCP.AssociationReleaseWorkerCount)
+	if workers == 0 || workers > PfcpMaximumAssociationReleaseWorkers {
+		return PfcpDefaultAssociationReleaseWorkers
+	}
+	return workers
+}
+
 func (p *PFCP) validate() (bool, error) {
 	if p.DispatchWorkerCount > PfcpMaximumDispatchWorkers {
 		return false, fmt.Errorf("pfcp.dispatchWorkerCount must be between 1 and %d when set",
 			PfcpMaximumDispatchWorkers)
+	}
+	if p.AssociationReleaseWorkerCount > PfcpMaximumAssociationReleaseWorkers {
+		return false, fmt.Errorf("pfcp.associationReleaseWorkerCount must be between 1 and %d when set",
+			PfcpMaximumAssociationReleaseWorkers)
 	}
 	result, err := govalidator.ValidateStruct(p)
 	return result, appendInvalid(err)

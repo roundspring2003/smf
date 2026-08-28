@@ -1,10 +1,12 @@
 package pfcp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
@@ -35,7 +37,7 @@ func TestSendSessionEstablishmentRequest(t *testing.T) {
 		ie.NewNodeIDHeuristic("127.0.0.1"),
 		ie.NewFSEID(localSEID, net.ParseIP("127.0.0.1").To4(), nil),
 	)
-	response, err := s.SendSessionEstablishmentRequest(request, peerAddr, localSEID)
+	response, err := s.SendSessionEstablishmentRequest(context.Background(), request, peerAddr, localSEID)
 	if err != nil {
 		t.Fatalf("SendSessionEstablishmentRequest() error: %v", err)
 	}
@@ -63,6 +65,7 @@ func TestSendSessionEstablishmentRequestReturnsRejectedResponse(t *testing.T) {
 	})
 
 	response, err := s.SendSessionEstablishmentRequest(
+		context.Background(),
 		message.NewSessionEstablishmentRequest(0, 0, 0, 0, 0),
 		peerAddr,
 		localSEID,
@@ -88,6 +91,7 @@ func TestSendSessionEstablishmentRequestRejectsWrongSEID(t *testing.T) {
 	})
 
 	_, err := s.SendSessionEstablishmentRequest(
+		context.Background(),
 		message.NewSessionEstablishmentRequest(0, 0, 0, 0, 0),
 		peerAddr,
 		42,
@@ -112,6 +116,7 @@ func TestSendSessionEstablishmentRequestRequiresUPFSEIDWhenAccepted(t *testing.T
 	})
 
 	_, err := s.SendSessionEstablishmentRequest(
+		context.Background(),
 		message.NewSessionEstablishmentRequest(0, 0, 0, 0, 0),
 		peerAddr,
 		localSEID,
@@ -143,6 +148,7 @@ func TestSendSessionDeletionRequest(t *testing.T) {
 	})
 
 	response, err := s.SendSessionDeletionRequest(
+		context.Background(),
 		message.NewSessionDeletionRequest(0, 0, remoteSEID, 0, 0),
 		peerAddr,
 		localSEID,
@@ -166,6 +172,7 @@ func TestSendSessionDeletionRequestRequiresCause(t *testing.T) {
 	})
 
 	_, err := s.SendSessionDeletionRequest(
+		context.Background(),
 		message.NewSessionDeletionRequest(0, 0, 77, 0, 0),
 		peerAddr,
 		localSEID,
@@ -175,5 +182,53 @@ func TestSendSessionDeletionRequestRequiresCause(t *testing.T) {
 	}
 	if peerErr := <-peerDone; peerErr != nil {
 		t.Fatalf("UPF peer error: %v", peerErr)
+	}
+}
+
+func TestSendSessionDeletionRequestCancelsTransaction(t *testing.T) {
+	s, _ := startTestPfcpServer(t)
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP() error: %v", err)
+	}
+	defer peer.Close()
+	received := make(chan struct{}, 1)
+	go func() {
+		packet := make([]byte, 1500)
+		if _, _, readErr := peer.ReadFromUDP(packet); readErr == nil {
+			received <- struct{}{}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, err = s.SendSessionDeletionRequest(
+		ctx,
+		message.NewSessionDeletionRequest(0, 0, 901, 0, 0),
+		peer.LocalAddr().(*net.UDPAddr),
+		902,
+	)
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("SendSessionDeletionRequest() error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("UPF peer did not receive Session Deletion Request")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		transactions := 0
+		s.txTrans.Range(func(_, _ any) bool {
+			transactions++
+			return true
+		})
+		if transactions == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d transaction(s) remained after context cancellation", transactions)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

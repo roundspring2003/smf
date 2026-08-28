@@ -1,6 +1,7 @@
 package pfcp
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -185,7 +186,7 @@ func (s *PfcpServer) main(wg *sync.WaitGroup) {
 		case txMsg := <-s.txCh:
 			var sendErr error
 			if txMsg.TrType == TX {
-				sendErr = s.sendReqTo(txMsg.Msg, txMsg.RemoteAddr, txMsg.RspCh)
+				sendErr = s.sendReqTo(txMsg.Context, txMsg.Msg, txMsg.RemoteAddr, txMsg.RspCh)
 			} else {
 				sendErr = s.sendRspTo(txMsg.Msg, txMsg.RemoteAddr)
 			}
@@ -314,48 +315,48 @@ func sendToRcvCh(
 	}
 }
 
-// SendRequest sends one concrete go-pfcp request through the server-owned
-// transaction layer. Procedure-specific senders validate the concrete response
-// type, mandatory IEs and SEID after this transport-level operation returns.
-func (s *PfcpServer) SendRequest(request message.Message, addr *net.UDPAddr) (message.Message, error) {
-	if s == nil || request == nil || !request.IsRequest() {
+// sendRequest sends one concrete go-pfcp request through the server-owned
+// transaction layer. Every caller supplies a context, so queueing, response
+// waiting, retransmission, and sequence ownership share one cancellation path.
+func (s *PfcpServer) sendRequest(
+	ctx context.Context,
+	request message.Message,
+	addr *net.UDPAddr,
+) (message.Message, error) {
+	if s == nil || request == nil || !request.IsRequest() || addr == nil {
 		return nil, fmt.Errorf("send PFCP request: invalid request")
 	}
-	responseChannel := s.SendPfcpMsg(request, addr)
-	if responseChannel == nil {
+	if ctx == nil {
+		return nil, fmt.Errorf("send PFCP request: nil context")
+	}
+	responseChannel := make(chan RcvPfcpMsg, 1)
+	transmit := TransmitMessage{
+		Context: ctx, Msg: request, RemoteAddr: addr, TrType: TX, RspCh: responseChannel,
+	}
+	select {
+	case <-s.stopCh:
 		return nil, fmt.Errorf("send PFCP request to %v: PFCP server is stopped", addr)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("send PFCP request to %v: %w", addr, ctx.Err())
+	case s.txCh <- transmit:
 	}
 
 	select {
 	case <-s.stopCh:
 		return nil, fmt.Errorf("send PFCP request to %v: PFCP server is stopped", addr)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("send PFCP request to %v: %w", addr, ctx.Err())
 	case received, ok := <-responseChannel:
 		if !ok || received.Msg == nil {
 			if isServerStopped(s.stopCh) {
 				return nil, fmt.Errorf("send PFCP request to %v: PFCP server is stopped", addr)
 			}
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("send PFCP request to %v: %w", addr, err)
+			}
 			return nil, fmt.Errorf("PFCP request to %v timed out", addr)
 		}
 		return received.Msg, nil
-	}
-}
-
-func (s *PfcpServer) SendPfcpMsg(msg message.Message, addr *net.UDPAddr) chan RcvPfcpMsg {
-	if s == nil || msg == nil || addr == nil {
-		return nil
-	}
-
-	transmit := TransmitMessage{Msg: msg, RemoteAddr: addr, TrType: RX}
-	if msg.IsRequest() {
-		transmit.TrType = TX
-		transmit.RspCh = make(chan RcvPfcpMsg, 1)
-	}
-
-	select {
-	case <-s.stopCh:
-		return nil
-	case s.txCh <- transmit:
-		return transmit.RspCh
 	}
 }
 
@@ -386,7 +387,12 @@ func (s *PfcpServer) SendPfcpResponse(msg message.Message, addr *net.UDPAddr) er
 	}
 }
 
-func (s *PfcpServer) sendReqTo(msg message.Message, addr *net.UDPAddr, response chan RcvPfcpMsg) error {
+func (s *PfcpServer) sendReqTo(
+	ctx context.Context,
+	msg message.Message,
+	addr *net.UDPAddr,
+	response chan RcvPfcpMsg,
+) error {
 	if !msg.IsRequest() {
 		return fmt.Errorf("message type %d is not a PFCP request", msg.MessageType())
 	}
@@ -394,6 +400,7 @@ func (s *PfcpServer) sendReqTo(msg message.Message, addr *net.UDPAddr, response 
 	if err != nil {
 		return err
 	}
+	tx.watchContext(ctx)
 	if err = tx.send(msg); err != nil {
 		tx.complete(RcvPfcpMsg{Msg: nil})
 		return err

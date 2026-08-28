@@ -22,8 +22,8 @@ const pfcpPeerPort = 8805
 // association state machine. *pfcp.PfcpServer satisfies this interface without
 // making processor import internal/pfcp and creating an import cycle.
 type ActivePFCPClient interface {
-	SendAssociationSetupRequest(*net.UDPAddr) (*message.AssociationSetupResponse, error)
-	SendHeartbeatRequest(*net.UDPAddr) (*message.HeartbeatResponse, error)
+	SendAssociationSetupRequest(context.Context, *net.UDPAddr) (*message.AssociationSetupResponse, error)
+	SendHeartbeatRequest(context.Context, *net.UDPAddr) (*message.HeartbeatResponse, error)
 }
 
 func (p *Processor) SetActivePFCPClient(client ActivePFCPClient) {
@@ -43,18 +43,20 @@ func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *s
 	for {
 		select {
 		case <-smfPfcpContext.Done():
+			upf.CancelAssociation()
 			logger.MainLog.Infoln("Canceled SMF PFCP context")
 			return
 		default:
 		}
 
-		if !p.ensureSetupPfcpAssociation(smfPfcpContext, upf, upfStr) {
+		associationContext, established := p.ensureSetupPfcpAssociation(smfPfcpContext, upf, upfStr)
+		if !established {
 			return
 		}
 		if smf_context.GetSelf().PfcpHeartbeatInterval == 0 {
 			return
 		}
-		if err := p.keepHeartbeatTo(upf, upfStr); err != nil {
+		if err := p.keepHeartbeatTo(associationContext, upf, upfStr); err != nil {
 			logger.MainLog.Errorf("PFCP Heartbeat error: %v", err)
 		}
 
@@ -79,22 +81,31 @@ func (p *Processor) ensureSetupPfcpAssociation(
 	parentContext context.Context,
 	upf *smf_context.UPF,
 	upfStr string,
-) bool {
+) (context.Context, bool) {
 	alertTime := time.Now()
 	alertInterval := smf_context.GetSelf().AssocFailAlertInterval
 	retryInterval := smf_context.GetSelf().AssocFailRetryInterval
 
+	if parentContext.Err() != nil {
+		upf.CancelAssociation()
+		return nil, false
+	}
+	if !upf.BeginAssociationSetup() {
+		// Another lifecycle owner is already setting up, monitoring, or releasing
+		// this UPF. Do not start a second heartbeat loop for the same association.
+		return nil, false
+	}
+	// This is harmless after EstablishAssociation changes the state to
+	// Established, and guarantees that every failed/canceled return puts a
+	// SettingUp association back into Down.
+	defer upf.FailAssociationSetup()
 	for {
-		select {
-		case <-parentContext.Done():
-			logger.MainLog.Infoln("Canceled SMF PFCP context")
-			return false
-		default:
-		}
-
-		if err := p.setupPfcpAssociation(upf, upfStr); err == nil {
-			upf.AssociationContext, upf.CancelAssociation = context.WithCancel(parentContext)
-			return true
+		if err := p.setupPfcpAssociation(parentContext, upf, upfStr); err == nil {
+			if parentContext.Err() != nil {
+				return nil, false
+			}
+			associationContext := upf.EstablishAssociation(parentContext)
+			return associationContext, true
 		} else {
 			logger.MainLog.Warnf("Failed to setup an association with UPF[%s], error:%+v", upfStr, err)
 			now := time.Now()
@@ -114,13 +125,17 @@ func (p *Processor) ensureSetupPfcpAssociation(
 				}
 			}
 			logger.MainLog.Infoln("Canceled SMF PFCP context")
-			return false
+			return nil, false
 		case <-timer.C:
 		}
 	}
 }
 
-func (p *Processor) setupPfcpAssociation(upf *smf_context.UPF, upfStr string) error {
+func (p *Processor) setupPfcpAssociation(
+	ctx context.Context,
+	upf *smf_context.UPF,
+	upfStr string,
+) error {
 	logger.MainLog.Infof("Sending PFCP Association Request to UPF%s", upfStr)
 
 	client := p.getActivePFCPClient()
@@ -128,7 +143,7 @@ func (p *Processor) setupPfcpAssociation(upf *smf_context.UPF, upfStr string) er
 		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
-	response, err := client.SendAssociationSetupRequest(&net.UDPAddr{
+	response, err := client.SendAssociationSetupRequest(ctx, &net.UDPAddr{
 		IP:   upf.NodeID.ResolveNodeIdToIp(),
 		Port: pfcpPeerPort,
 	})
@@ -149,15 +164,19 @@ func (p *Processor) setupPfcpAssociation(upf *smf_context.UPF, upfStr string) er
 	return nil
 }
 
-func (p *Processor) keepHeartbeatTo(upf *smf_context.UPF, upfStr string) error {
+func (p *Processor) keepHeartbeatTo(
+	ctx context.Context,
+	upf *smf_context.UPF,
+	upfStr string,
+) error {
 	for {
-		if err := p.doPfcpHeartbeat(upf, upfStr); err != nil {
+		if err := p.doPfcpHeartbeat(ctx, upf, upfStr); err != nil {
 			return err
 		}
 
 		timer := time.NewTimer(smf_context.GetSelf().PfcpHeartbeatInterval)
 		select {
-		case <-upf.AssociationContext.Done():
+		case <-upf.AssociationDone():
 			if !timer.Stop() {
 				select {
 				case <-timer.C:
@@ -171,7 +190,11 @@ func (p *Processor) keepHeartbeatTo(upf *smf_context.UPF, upfStr string) error {
 	}
 }
 
-func (p *Processor) doPfcpHeartbeat(upf *smf_context.UPF, upfStr string) error {
+func (p *Processor) doPfcpHeartbeat(
+	ctx context.Context,
+	upf *smf_context.UPF,
+	upfStr string,
+) error {
 	if err := upf.IsAssociated(); err != nil {
 		return fmt.Errorf("cancel heartbeat: %+v", err)
 	}
@@ -182,7 +205,7 @@ func (p *Processor) doPfcpHeartbeat(upf *smf_context.UPF, upfStr string) error {
 		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
-	response, err := client.SendHeartbeatRequest(&net.UDPAddr{
+	response, err := client.SendHeartbeatRequest(ctx, &net.UDPAddr{
 		IP:   upf.NodeID.ResolveNodeIdToIp(),
 		Port: pfcpPeerPort,
 	})
@@ -216,9 +239,7 @@ func acceptHeartbeatRecoveryTime(upf *smf_context.UPF, upfStr string, recoveryTi
 }
 
 func cancelUPFAssociation(upf *smf_context.UPF) {
-	if upf.CancelAssociation != nil {
-		upf.CancelAssociation()
-	}
+	upf.CancelAssociation()
 	upf.RecoveryTimeStamp = time.Time{}
 }
 

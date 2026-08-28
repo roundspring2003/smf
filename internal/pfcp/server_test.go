@@ -1,7 +1,9 @@
 package pfcp
 
 import (
+	"context"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -121,18 +123,12 @@ func TestPfcpServerMatchesOutboundResponse(t *testing.T) {
 	}()
 
 	req := message.NewHeartbeatRequest(0, ie.NewRecoveryTimeStamp(time.Now()), nil)
-	rspCh := s.SendPfcpMsg(req, peer.LocalAddr().(*net.UDPAddr))
-	if rspCh == nil {
-		t.Fatal("SendPfcpMsg() returned a nil response channel for a request")
+	got, err := s.sendRequest(context.Background(), req, peer.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("sendRequest() error: %v", err)
 	}
-
-	select {
-	case got := <-rspCh:
-		if _, ok := got.Msg.(*message.HeartbeatResponse); !ok {
-			t.Fatalf("response = %T, want *message.HeartbeatResponse", got.Msg)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the matched response")
+	if _, ok := got.(*message.HeartbeatResponse); !ok {
+		t.Fatalf("response = %T, want *message.HeartbeatResponse", got)
 	}
 	if err = <-peerDone; err != nil {
 		t.Fatalf("peer error: %v", err)
@@ -143,21 +139,10 @@ func TestPfcpServerTxTimeout(t *testing.T) {
 	s, _ := startTestPfcpServer(t)
 	blackHole := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
 	req := message.NewHeartbeatRequest(0, ie.NewRecoveryTimeStamp(time.Now()), nil)
-	rspCh := s.SendPfcpMsg(req, blackHole)
-	if rspCh == nil {
-		t.Fatal("SendPfcpMsg() returned a nil response channel for a request")
-	}
 
-	select {
-	case got, ok := <-rspCh:
-		if !ok {
-			t.Fatal("response channel closed without a timeout notification")
-		}
-		if got.Msg != nil {
-			t.Fatalf("timeout Msg = %T, want nil", got.Msg)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for the timeout notification")
+	_, err := s.sendRequest(context.Background(), req, blackHole)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("sendRequest() error = %v, want timeout", err)
 	}
 }
 
@@ -165,10 +150,11 @@ func TestPfcpServerStopUnblocksPendingSenders(t *testing.T) {
 	s, wg := startTestPfcpServer(t)
 	blackHole := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}
 	req := message.NewHeartbeatRequest(0, ie.NewRecoveryTimeStamp(time.Now()), nil)
-	rspCh := s.SendPfcpMsg(req, blackHole)
-	if rspCh == nil {
-		t.Fatal("SendPfcpMsg() returned a nil response channel for a request")
-	}
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := s.sendRequest(context.Background(), req, blackHole)
+		sendDone <- err
+	}()
 
 	// Wait until the main loop has created the transaction before stopping.
 	deadline := time.Now().Add(time.Second)
@@ -183,9 +169,9 @@ func TestPfcpServerStopUnblocksPendingSenders(t *testing.T) {
 	wg.Wait()
 
 	select {
-	case got, ok := <-rspCh:
-		if ok && got.Msg != nil {
-			t.Fatalf("response after Stop() = %T, want nil or closed channel", got.Msg)
+	case err := <-sendDone:
+		if err == nil || !strings.Contains(err.Error(), "stopped") {
+			t.Fatalf("sendRequest() error after Stop = %v, want stopped", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Stop() did not unblock the pending sender")
@@ -200,10 +186,12 @@ func TestPfcpServerDuplicateRequestUsesCachedResponse(t *testing.T) {
 	var dispatchCount atomic.Int32
 	s.SetDispatch(func(msg message.Message, addr *net.UDPAddr) {
 		dispatchCount.Add(1)
-		s.SendPfcpMsg(message.NewHeartbeatResponse(
+		if err := s.SendPfcpResponse(message.NewHeartbeatResponse(
 			msg.Sequence(),
 			ie.NewRecoveryTimeStamp(s.RecoveryTime()),
-		), addr)
+		), addr); err != nil {
+			t.Errorf("SendPfcpResponse() error: %v", err)
+		}
 	})
 
 	peer, err := net.DialUDP("udp", nil, s.LocalAddr())
