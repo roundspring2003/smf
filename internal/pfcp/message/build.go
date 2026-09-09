@@ -174,7 +174,7 @@ func qerToCreateQER(qer *context.QER) *pfcp.CreateQER {
 	createQER.QERID.QERID = qer.QERID
 	createQER.GateStatus = qer.GateStatus
 
-	createQER.QoSFlowIdentifier = &qer.QFI
+	createQER.QoSFlowIdentifier = qer.QFI
 	createQER.MaximumBitrate = qer.MBR
 	createQER.GuaranteedBitrate = qer.GBR
 

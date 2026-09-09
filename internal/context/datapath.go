@@ -610,7 +610,7 @@ func (dataPath *DataPath) ActivateTunnelAndPDR(smContext *SMContext, precedence 
 					logger.PduSessLog.Errorln("Cannot get the unit of DLMBR, please check the settings in web console")
 					return
 				}
-				newQER.QFI.QFI = sessionRule.DefQosQFI
+				// Session-AMBR is shared across non-GBR flows; it does not select a QFI.
 				newQER.GateStatus = &pfcpType.GateStatus{
 					ULGate: pfcpType.GateOpen,
 					DLGate: pfcpType.GateOpen,
@@ -633,7 +633,7 @@ func (dataPath *DataPath) ActivateTunnelAndPDR(smContext *SMContext, precedence 
 					logger.PduSessLog.Errorln("new QER failed")
 					return
 				} else {
-					newQER.QFI.QFI = sessionRule.DefQosQFI
+					newQER.QFI = &pfcpType.QFI{QFI: sessionRule.DefQosQFI}
 					newQER.GateStatus = &pfcpType.GateStatus{
 						ULGate: pfcpType.GateOpen,
 						DLGate: pfcpType.GateOpen,
@@ -907,7 +907,7 @@ func (dataPath *DataPath) ActivateDcTunnelAndPDR(smContext *SMContext, precedenc
 					logger.PduSessLog.Errorln("Cannot get the unit of DLMBR, please check the settings in web console")
 					return
 				}
-				newQER.QFI.QFI = sessionRule.DefQosQFI
+				// Session-AMBR is shared across non-GBR flows; it does not select a QFI.
 				newQER.GateStatus = &pfcpType.GateStatus{
 					ULGate: pfcpType.GateOpen,
 					DLGate: pfcpType.GateOpen,
@@ -930,7 +930,7 @@ func (dataPath *DataPath) ActivateDcTunnelAndPDR(smContext *SMContext, precedenc
 					logger.PduSessLog.Errorln("new QER failed")
 					return
 				} else {
-					newQER.QFI.QFI = sessionRule.DefQosQFI
+					newQER.QFI = &pfcpType.QFI{QFI: sessionRule.DefQosQFI}
 					newQER.GateStatus = &pfcpType.GateStatus{
 						ULGate: pfcpType.GateOpen,
 						DLGate: pfcpType.GateOpen,
@@ -1350,7 +1350,7 @@ func (p *DataPath) AddQoS(smContext *SMContext, qfi uint8, qos *models.Pcf_SMPol
 				logger.PduSessLog.Errorln("new QER failed")
 				return
 			} else {
-				newQER.QFI = pfcpType.QFI{
+				newQER.QFI = &pfcpType.QFI{
 					QFI: qfi,
 				}
 				newQER.GateStatus = &pfcpType.GateStatus{

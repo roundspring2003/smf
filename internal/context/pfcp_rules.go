@@ -262,7 +262,8 @@ type BAR struct {
 type QER struct {
 	QERID uint32
 
-	QFI pfcpType.QFI
+	// QFI is absent for QERs that only enforce a shared rate, such as Session-AMBR.
+	QFI *pfcpType.QFI
 
 	GateStatus *pfcpType.GateStatus
 	MBR        *pfcpType.MBR
