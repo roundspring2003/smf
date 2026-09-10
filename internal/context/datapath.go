@@ -1402,24 +1402,25 @@ func (p *DataPath) AddQoS(smContext *SMContext, qfi uint8, qos *models.Pcf_SMPol
 					}
 				} else {
 					logger.PduSessLog.Debugf("AddQoS: Non-GBR flow for QFI=%d", qfi)
-					var bitRateKbpsSessionAmbrMBRUL uint64
-					var bitRateKbpsSessionAmbrMBRDL uint64
+					var bitRateKbpsQoSMBRUL uint64
+					var bitRateKbpsQoSMBRDL uint64
 					var bitRateConvertErr error
-					bitRateKbpsSessionAmbrMBRUL, bitRateConvertErr = util.BitRateTokbps(qos.MaxbrUl)
+					bitRateKbpsQoSMBRUL, bitRateConvertErr = util.BitRateTokbps(qos.MaxbrUl)
 					if bitRateConvertErr != nil {
 						logger.PduSessLog.Error("Cannot get the unit of MBRUL, please check the settings in web console")
 						return
 					}
-					bitRateKbpsSessionAmbrMBRDL, bitRateConvertErr = util.BitRateTokbps(qos.MaxbrDl)
+					bitRateKbpsQoSMBRDL, bitRateConvertErr = util.BitRateTokbps(qos.MaxbrDl)
 
 					if bitRateConvertErr != nil {
 						logger.PduSessLog.Error("Cannot get the unit of MBRDL, please check the settings in web console")
 						return
 					}
-					// Non-GBR flow should follows session-AMBR
+					// Apply the MBR from the PCC rule's referenced QoS data.
+					// Session-AMBR is enforced by a separate shared QER.
 					newQER.MBR = &pfcpType.MBR{
-						ULMBR: bitRateKbpsSessionAmbrMBRUL,
-						DLMBR: bitRateKbpsSessionAmbrMBRDL,
+						ULMBR: bitRateKbpsQoSMBRUL,
+						DLMBR: bitRateKbpsQoSMBRDL,
 					}
 				}
 				qer = newQER
