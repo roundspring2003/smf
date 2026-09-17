@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"runtime/debug"
@@ -22,6 +23,9 @@ const (
 	MaxPfcpMsgLen = 65536
 	rcvChLen      = 8192
 	txDispChLen   = rcvChLen / 2
+
+	udpReadRetryInitialDelay = 5 * time.Millisecond
+	udpReadRetryMaximumDelay = time.Second
 )
 
 type TransType string
@@ -35,6 +39,13 @@ type smfIface interface {
 	Config() *factory.Config
 }
 
+type pfcpConn interface {
+	Close() error
+	LocalAddr() net.Addr
+	ReadFromUDP([]byte) (int, *net.UDPAddr, error)
+	WriteToUDP([]byte, *net.UDPAddr) (int, error)
+}
+
 // PfcpServer owns SMF's PFCP UDP socket and transaction state. PFCP wire
 // encoding remains the responsibility of github.com/wmnsk/go-pfcp.
 type PfcpServer struct {
@@ -42,7 +53,7 @@ type PfcpServer struct {
 
 	addr string
 	port int
-	conn *net.UDPConn
+	conn pfcpConn
 
 	rcvCh  chan RcvPfcpMsg
 	txCh   chan TransmitMessage
@@ -253,15 +264,27 @@ func (s *PfcpServer) receiver(wg *sync.WaitGroup) {
 	}()
 
 	buffer := make([]byte, MaxPfcpMsgLen)
+	retryDelay := time.Duration(0)
 	for {
 		n, addr, err := s.conn.ReadFromUDP(buffer)
 		if err != nil {
-			if !isServerStopped(s.stopCh) {
-				s.log.Errorf("PFCP ReadFromUDP: %v", err)
-				s.Stop()
+			if isServerStopped(s.stopCh) {
+				return
 			}
-			return
+			if errors.Is(err, net.ErrClosed) {
+				s.log.Errorf("PFCP UDP socket closed unexpectedly: %v", err)
+				s.Stop()
+				return
+			}
+
+			s.log.Warnf("PFCP ReadFromUDP: %v; retrying in %s", err, retryDelay)
+			if !waitForUDPReadRetry(s.stopCh, retryDelay) {
+				return
+			}
+			retryDelay = nextUDPReadRetryDelay(retryDelay)
+			continue
 		}
+		retryDelay = 0
 
 		packet := make([]byte, n)
 		copy(packet, buffer[:n])
@@ -281,6 +304,36 @@ func (s *PfcpServer) receiver(wg *sync.WaitGroup) {
 			continue
 		}
 		sendToRcvCh(s.stopCh, s.rcvCh, RcvPfcpMsg{RemoteAddr: *addr, Msg: msg}, s.log)
+	}
+}
+
+func nextUDPReadRetryDelay(previous time.Duration) time.Duration {
+	if previous == 0 {
+		return udpReadRetryInitialDelay
+	}
+	next := previous * 2
+	if next > udpReadRetryMaximumDelay {
+		return udpReadRetryMaximumDelay
+	}
+	return next
+}
+
+func waitForUDPReadRetry(stop <-chan struct{}, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	select {
+	case <-stop:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

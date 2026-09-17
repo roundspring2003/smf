@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1697,4 +1698,84 @@ func txSequenceInUse(s *PfcpServer, sequence uint32) bool {
 func panicTxTimer(tx *TxTransaction, generation uint64) {
 	defer tx.recoverTimerPanic(generation)
 	panic("injected Tx timer failure")
+}
+
+type transientReadErrorConn struct {
+	packet    []byte
+	peer      *net.UDPAddr
+	closed    chan struct{}
+	closeOnce sync.Once
+	readCount atomic.Int32
+}
+
+func (c *transientReadErrorConn) ReadFromUDP(buffer []byte) (int, *net.UDPAddr, error) {
+	switch c.readCount.Add(1) {
+	case 1:
+		return 0, nil, &net.OpError{Op: "read", Net: "udp", Err: syscall.ECONNREFUSED}
+	case 2:
+		return copy(buffer, c.packet), c.peer, nil
+	default:
+		<-c.closed
+		return 0, nil, net.ErrClosed
+	}
+}
+
+func (c *transientReadErrorConn) WriteToUDP(packet []byte, _ *net.UDPAddr) (int, error) {
+	return len(packet), nil
+}
+
+func (c *transientReadErrorConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: PfcpPort}
+}
+
+func (c *transientReadErrorConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestReceiverContinuesAfterTransientUDPReadError(t *testing.T) {
+	request := message.NewHeartbeatRequest(
+		91,
+		ie.NewRecoveryTimeStamp(time.Now()),
+		nil,
+	)
+	packet, err := request.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.80"), Port: PfcpPort}
+	connection := &transientReadErrorConn{
+		packet: packet,
+		peer:   peer,
+		closed: make(chan struct{}),
+	}
+	server := NewPfcpServer(&fakeSmf{cfg: &factory.Config{}}, "127.0.0.1")
+	server.conn = connection
+
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(1)
+	go server.receiver(&waitGroup)
+	t.Cleanup(func() {
+		server.Stop()
+		waitGroup.Wait()
+	})
+
+	select {
+	case received := <-server.rcvCh:
+		if received.Msg == nil || received.Msg.Sequence() != request.Sequence() {
+			t.Fatalf("received message = %#v, want sequence %#x", received.Msg, request.Sequence())
+		}
+		if !received.RemoteAddr.IP.Equal(peer.IP) {
+			t.Fatalf("received peer = %v, want %v", received.RemoteAddr.IP, peer.IP)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receiver did not continue after a transient UDP read error")
+	}
+
+	if isServerStopped(server.stopCh) {
+		t.Fatal("transient UDP read error stopped the PFCP server")
+	}
+	if got := connection.readCount.Load(); got < 2 {
+		t.Fatalf("ReadFromUDP() calls = %d, want at least 2", got)
+	}
 }
