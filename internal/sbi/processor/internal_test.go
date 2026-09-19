@@ -290,7 +290,7 @@ func TestActiveAssociationSetupStoresUPFRecoveryTime(t *testing.T) {
 	if err := p.setupPfcpAssociation(context.Background(), upf, "[192.0.2.10]"); err != nil {
 		t.Fatalf("setupPfcpAssociation() error: %v", err)
 	}
-	if got, want := upf.RecoveryTimeStamp.Unix(), recoveryTime.Unix(); got != want {
+	if got, want := upf.RecoveryTimeStamp().Unix(), recoveryTime.Unix(); got != want {
 		t.Fatalf("UPF RecoveryTimeStamp = %d, want %d", got, want)
 	}
 }
@@ -298,7 +298,7 @@ func TestActiveAssociationSetupStoresUPFRecoveryTime(t *testing.T) {
 func TestActiveHeartbeatKeepsAssociationForSameRecoveryTime(t *testing.T) {
 	upf := newActiveAssociationTestUPF(t)
 	recoveryTime := time.Now().Add(-time.Hour).Truncate(time.Second)
-	upf.RecoveryTimeStamp = recoveryTime
+	upf.SetRecoveryTimeStamp(recoveryTime)
 	p := &Processor{}
 	p.SetActivePFCPClient(&fakeActivePFCPClient{
 		heartbeat: func(*net.UDPAddr) (*message.HeartbeatResponse, error) {
@@ -319,7 +319,7 @@ func TestActiveHeartbeatKeepsAssociationForSameRecoveryTime(t *testing.T) {
 
 func TestActiveHeartbeatFailureCancelsAssociation(t *testing.T) {
 	upf := newActiveAssociationTestUPF(t)
-	upf.RecoveryTimeStamp = time.Now().Add(-time.Hour).Truncate(time.Second)
+	upf.SetRecoveryTimeStamp(time.Now().Add(-time.Hour).Truncate(time.Second))
 	p := &Processor{}
 	p.SetActivePFCPClient(&fakeActivePFCPClient{
 		heartbeat: func(*net.UDPAddr) (*message.HeartbeatResponse, error) {
@@ -334,15 +334,15 @@ func TestActiveHeartbeatFailureCancelsAssociation(t *testing.T) {
 	if err = upf.IsAssociated(); err == nil {
 		t.Fatal("UPF remains associated after heartbeat failure")
 	}
-	if !upf.RecoveryTimeStamp.IsZero() {
-		t.Fatalf("UPF RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp)
+	if !upf.RecoveryTimeStamp().IsZero() {
+		t.Fatalf("UPF RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp())
 	}
 }
 
 func TestActiveHeartbeatDetectsUPFRestart(t *testing.T) {
 	upf := newActiveAssociationTestUPF(t)
 	oldRecoveryTime := time.Now().Add(-time.Hour).Truncate(time.Second)
-	upf.RecoveryTimeStamp = oldRecoveryTime
+	upf.SetRecoveryTimeStamp(oldRecoveryTime)
 	p := &Processor{}
 	p.SetActivePFCPClient(&fakeActivePFCPClient{
 		heartbeat: func(*net.UDPAddr) (*message.HeartbeatResponse, error) {
@@ -360,8 +360,8 @@ func TestActiveHeartbeatDetectsUPFRestart(t *testing.T) {
 	if err = upf.IsAssociated(); err == nil {
 		t.Fatal("UPF remains associated after Recovery Time Stamp changed")
 	}
-	if !upf.RecoveryTimeStamp.IsZero() {
-		t.Fatalf("UPF RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp)
+	if !upf.RecoveryTimeStamp().IsZero() {
+		t.Fatalf("UPF RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp())
 	}
 }
 
@@ -381,7 +381,7 @@ func TestActiveHeartbeatUsesFirstRecoveryTimeAsBaseline(t *testing.T) {
 	if err := p.doPfcpHeartbeat(context.Background(), upf, "[192.0.2.10]"); err != nil {
 		t.Fatalf("doPfcpHeartbeat() error: %v", err)
 	}
-	if got, want := upf.RecoveryTimeStamp.Unix(), recoveryTime.Unix(); got != want {
+	if got, want := upf.RecoveryTimeStamp().Unix(), recoveryTime.Unix(); got != want {
 		t.Fatalf("UPF RecoveryTimeStamp = %d, want %d", got, want)
 	}
 }
@@ -453,15 +453,15 @@ func TestProcessorPassiveAssociationStateUsesConfiguredUPF(t *testing.T) {
 	}
 
 	upf.EstablishAssociation(context.Background())
-	upf.RecoveryTimeStamp = time.Now()
+	upf.SetRecoveryTimeStamp(time.Now())
 	if cause = p.ReleaseAssociation(peer); cause != ie.CauseRequestAccepted {
 		t.Fatalf("ReleaseAssociation() cause = %d, want Request Accepted", cause)
 	}
 	if err := upf.IsAssociated(); err == nil {
 		t.Fatal("UPF remains associated after passive Association Release")
 	}
-	if !upf.RecoveryTimeStamp.IsZero() {
-		t.Fatalf("RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp)
+	if !upf.RecoveryTimeStamp().IsZero() {
+		t.Fatalf("RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp())
 	}
 }
 
@@ -572,7 +572,7 @@ func TestProcessorPassiveAssociationUpdateReleasesAfterResponse(t *testing.T) {
 	upf := smf_context.NewUPF(&nodeID, nil)
 	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
 	associationContext := upf.EstablishAssociation(pfcpContext)
-	upf.RecoveryTimeStamp = time.Now()
+	upf.SetRecoveryTimeStamp(time.Now())
 	t.Cleanup(upf.CancelAssociation)
 	releaseCount := 0
 	p := &Processor{}
@@ -628,8 +628,8 @@ func TestProcessorPassiveAssociationUpdateReleasesAfterResponse(t *testing.T) {
 	if err := upf.IsAssociated(); err == nil {
 		t.Fatal("UPF remains associated after Association Release")
 	}
-	if !upf.RecoveryTimeStamp.IsZero() {
-		t.Fatalf("RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp)
+	if !upf.RecoveryTimeStamp().IsZero() {
+		t.Fatalf("RecoveryTimeStamp = %v, want zero", upf.RecoveryTimeStamp())
 	}
 }
 
@@ -650,7 +650,7 @@ func TestAssociationUpdateDeletesAffectedSessionsBeforeRelease(t *testing.T) {
 		smf_context.RemoveUPFNodeByNodeID(otherNodeID)
 	})
 	upf.EstablishAssociation(context.Background())
-	upf.RecoveryTimeStamp = time.Now()
+	upf.SetRecoveryTimeStamp(time.Now())
 	t.Cleanup(upf.CancelAssociation)
 	otherUPF.EstablishAssociation(context.Background())
 	t.Cleanup(otherUPF.CancelAssociation)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -435,4 +436,43 @@ func TestUPFAssociationReleaseWaitsForInFlightSessionWork(t *testing.T) {
 		t.Fatal("restored Session work returned a nil association context")
 	}
 	finishSessionWork()
+}
+
+func TestUPFRecoveryTimeStampConcurrentAccess(t *testing.T) {
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.110").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+
+	baseline := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if !upf.AcceptRecoveryTimeStamp(baseline) {
+		t.Fatal("first recovery timestamp was rejected")
+	}
+	if got := upf.RecoveryTimeStamp(); !got.Equal(baseline) {
+		t.Fatalf("RecoveryTimeStamp() = %v, want %v", got, baseline)
+	}
+	if upf.AcceptRecoveryTimeStamp(baseline.Add(time.Second)) {
+		t.Fatal("newer recovery timestamp did not signal a UPF restart")
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		recoveryTime := baseline.Add(time.Duration(i) * time.Second)
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			upf.SetRecoveryTimeStamp(recoveryTime)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = upf.RecoveryTimeStamp()
+		}()
+		go func() {
+			defer wg.Done()
+			_ = upf.AcceptRecoveryTimeStamp(recoveryTime)
+		}()
+	}
+	wg.Wait()
 }

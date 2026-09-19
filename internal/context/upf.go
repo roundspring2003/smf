@@ -71,10 +71,11 @@ var closedAssociationDone = func() <-chan struct{} {
 }()
 
 type UPF struct {
-	uuid              uuid.UUID
-	NodeID            pfcptype.NodeID
-	Addr              string
-	RecoveryTimeStamp time.Time
+	uuid                uuid.UUID
+	NodeID              pfcptype.NodeID
+	Addr                string
+	recoveryTimeStampMu sync.RWMutex
+	recoveryTimeStamp   time.Time
 
 	associationMu         sync.RWMutex
 	associationState      UPFAssociationState
@@ -119,6 +120,34 @@ func (upf *UPF) UPFunctionFeatures() []byte {
 	upf.upFunctionFeaturesMu.RLock()
 	defer upf.upFunctionFeaturesMu.RUnlock()
 	return append([]byte(nil), upf.upFunctionFeatures...)
+}
+
+// SetRecoveryTimeStamp replaces the UPF recovery-time baseline used by active
+// heartbeat restart detection.
+func (upf *UPF) SetRecoveryTimeStamp(recoveryTime time.Time) {
+	upf.recoveryTimeStampMu.Lock()
+	upf.recoveryTimeStamp = recoveryTime
+	upf.recoveryTimeStampMu.Unlock()
+}
+
+// RecoveryTimeStamp returns the current UPF recovery-time baseline.
+func (upf *UPF) RecoveryTimeStamp() time.Time {
+	upf.recoveryTimeStampMu.RLock()
+	defer upf.recoveryTimeStampMu.RUnlock()
+	return upf.recoveryTimeStamp
+}
+
+// AcceptRecoveryTimeStamp installs the first heartbeat recovery time and
+// atomically compares later values with that baseline. It returns false when
+// the UPF advertises a newer timestamp and has therefore restarted.
+func (upf *UPF) AcceptRecoveryTimeStamp(recoveryTime time.Time) bool {
+	upf.recoveryTimeStampMu.Lock()
+	defer upf.recoveryTimeStampMu.Unlock()
+	if upf.recoveryTimeStamp.IsZero() {
+		upf.recoveryTimeStamp = recoveryTime
+		return true
+	}
+	return !upf.recoveryTimeStamp.Before(recoveryTime)
 }
 
 // AssociationState returns the current node-level PFCP association state.

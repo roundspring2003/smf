@@ -157,7 +157,7 @@ func (p *Processor) setupPfcpAssociation(
 	if err != nil {
 		return fmt.Errorf("decode PFCP Association Setup Recovery Time Stamp from UPF%s: %w", upfStr, err)
 	}
-	upf.RecoveryTimeStamp = recoveryTime
+	upf.SetRecoveryTimeStamp(recoveryTime)
 
 	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
 	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
@@ -227,20 +227,16 @@ func (p *Processor) doPfcpHeartbeat(
 
 func acceptHeartbeatRecoveryTime(upf *smf_context.UPF, upfStr string, recoveryTime time.Time) error {
 	logger.MainLog.Debugf("Received PFCP Heartbeat Response from UPF%s", upfStr)
-	if upf.RecoveryTimeStamp.IsZero() {
-		upf.RecoveryTimeStamp = recoveryTime
+	if upf.AcceptRecoveryTimeStamp(recoveryTime) {
 		return nil
 	}
-	if upf.RecoveryTimeStamp.Before(recoveryTime) {
-		cancelUPFAssociation(upf)
-		return fmt.Errorf("received PFCP Heartbeat Response RecoveryTimeStamp has been updated")
-	}
-	return nil
+	cancelUPFAssociation(upf)
+	return fmt.Errorf("received PFCP Heartbeat Response RecoveryTimeStamp has been updated")
 }
 
 func cancelUPFAssociation(upf *smf_context.UPF) {
 	upf.CancelAssociation()
-	upf.RecoveryTimeStamp = time.Time{}
+	upf.SetRecoveryTimeStamp(time.Time{})
 }
 
 func (p *Processor) releaseAllResourcesOfUPF(upf *smf_context.UPF, upfStr string) {
