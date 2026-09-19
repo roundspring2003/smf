@@ -1,6 +1,7 @@
 package context
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/wmnsk/go-pfcp/ie"
@@ -10,28 +11,51 @@ import (
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 )
 
-// HandleReports converts grouped go-pfcp Usage Report IEs into the charging
-// domain records consumed by the CHF flow. The same parser is used for Session
-// Modification Response, Session Deletion Response and Session Report Request.
+// HandleReports converts every valid grouped go-pfcp Usage Report IE into the
+// charging domain records consumed by the CHF flow. It returns the decode
+// errors after preserving the valid reports in the same PFCP message.
 func (smContext *SMContext) HandleReports(
 	reports []*ie.IE,
 	nodeID pfcptype.NodeID,
 	reportType models.Chf_ConvCharging_TriggerType,
+) error {
+	return smContext.handleReports(reports, nodeID, reportType, false)
+}
+
+// HandleReportsAtomically decodes the complete set before changing charging
+// state. It is used for Session Report Requests, where an error response must
+// not accompany a partially applied request.
+func (smContext *SMContext) HandleReportsAtomically(
+	reports []*ie.IE,
+	nodeID pfcptype.NodeID,
+	reportType models.Chf_ConvCharging_TriggerType,
+) error {
+	return smContext.handleReports(reports, nodeID, reportType, true)
+}
+
+func (smContext *SMContext) handleReports(
+	reports []*ie.IE,
+	nodeID pfcptype.NodeID,
+	reportType models.Chf_ConvCharging_TriggerType,
+	atomicBatch bool,
 ) error {
 	upf := RetrieveUPFNodeByNodeID(nodeID)
 	if upf == nil {
 		return fmt.Errorf("UPF for Node ID %s not found", nodeID.String())
 	}
 
-	// Decode the whole set before mutating charging state. A malformed report
-	// must not leave a partially-applied batch behind.
 	decoded := make([]UsageReport, 0, len(reports))
+	decodeErrors := make([]error, 0)
 	for index, grouped := range reports {
 		report, err := usageReportFromIE(grouped, upf.UUID(), reportType)
 		if err != nil {
-			return fmt.Errorf("usage report[%d]: %w", index, err)
+			decodeErrors = append(decodeErrors, fmt.Errorf("usage report[%d]: %w", index, err))
+			continue
 		}
 		decoded = append(decoded, report)
+	}
+	if atomicBatch && len(decodeErrors) != 0 {
+		return errors.Join(decodeErrors...)
 	}
 	for _, report := range decoded {
 		logger.PduSessLog.Tracef(
@@ -41,7 +65,7 @@ func (smContext *SMContext) HandleReports(
 		)
 		smContext.UrrReports = append(smContext.UrrReports, report)
 	}
-	return nil
+	return errors.Join(decodeErrors...)
 }
 
 func usageReportFromIE(

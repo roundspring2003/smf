@@ -508,12 +508,15 @@ func (p *Processor) modifyExistingPfcpSession(
 	}
 
 	logger.PduSessLog.Infoln("Received PFCP Session Modification Accepted Response")
-	resCh <- SendPfcpResult{Status: smf_context.SessionUpdateSuccess}
 	if len(response.UsageReport) != 0 {
 		if err = smContext.HandleReports(response.UsageReport, state.upf.NodeID, reportReason); err != nil {
-			logger.PduSessLog.Errorf("decode PFCP Session Modification Usage Report: %v", err)
+			logger.PduSessLog.Errorf(
+				"decode one or more PFCP Session Modification Usage Reports; valid reports were preserved: %v",
+				err,
+			)
 		}
 	}
+	resCh <- SendPfcpResult{Status: smf_context.SessionUpdateSuccess}
 }
 
 func waitAllPfcpRsp(

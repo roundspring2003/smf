@@ -92,7 +92,7 @@ func (p *Processor) HandleSessionReportRequest(
 			logger.PfcpLog.Error("PFCP Session Report Request has USAR but no Usage Report")
 			return ie.CauseMandatoryIEMissing, remoteSEID
 		}
-		if err := smContext.HandleReports(request.UsageReport, upfNodeID, ""); err != nil {
+		if err := smContext.HandleReportsAtomically(request.UsageReport, upfNodeID, ""); err != nil {
 			logger.PfcpLog.Errorf("decode PFCP Session Report Usage Report: %v", err)
 			return ie.CauseMandatoryIEIncorrect, remoteSEID
 		}
