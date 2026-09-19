@@ -339,19 +339,20 @@ func (rx *RxTransaction) send(response message.Message) error {
 	}
 
 	rx.mu.Lock()
+	defer rx.mu.Unlock()
 	if rx.done {
-		rx.mu.Unlock()
 		return fmt.Errorf("PFCP response transaction %q is already complete", rx.id)
+	}
+	// Keep the transaction claimed while the write is in progress. The main
+	// loop cannot process a duplicate request concurrently, and holding this
+	// lock prevents a timer or Stop from retiring the transaction mid-write.
+	if _, err := rx.server.conn.WriteToUDP(packet, rx.destAddr); err != nil {
+		return fmt.Errorf("send PFCP response transaction %q: %w", rx.id, err)
 	}
 	rx.rsp = response
 	rx.msgBuf = packet
 	rx.handling = false
 	rx.resetTimerLocked()
-	rx.mu.Unlock()
-
-	if _, err := rx.server.conn.WriteToUDP(packet, rx.destAddr); err != nil {
-		return fmt.Errorf("send PFCP response transaction %q: %w", rx.id, err)
-	}
 	return nil
 }
 

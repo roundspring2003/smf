@@ -414,8 +414,8 @@ func (s *PfcpServer) sendRequest(
 }
 
 // SendPfcpResponse queues a response through the server main loop and waits
-// until it has been written (or failed). This completion point is required by
-// Association Setup, whose recovery side effects must run after the response.
+// until it has been written (or failed). Association side effects must run
+// only after this local write succeeds.
 func (s *PfcpServer) SendPfcpResponse(msg message.Message, addr *net.UDPAddr) error {
 	if s == nil || msg == nil || addr == nil {
 		return fmt.Errorf("send PFCP response: invalid argument")
@@ -469,7 +469,13 @@ func (s *PfcpServer) sendRspTo(msg message.Message, addr *net.UDPAddr) error {
 	if !found {
 		return fmt.Errorf("PFCP response transaction for %v sequence %#x was not found", addr, msg.Sequence())
 	}
-	return rx.send(msg)
+	if err := rx.send(msg); err != nil {
+		// A failed local write must not leave a cached response behind. The UPF
+		// can retransmit the request and receive a freshly handled response.
+		rx.stop()
+		return err
+	}
+	return nil
 }
 
 func (s *PfcpServer) loadTxTransaction(id string) (*TxTransaction, bool) {

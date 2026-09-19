@@ -482,13 +482,47 @@ func TestProcessorPassiveAssociationUpdateStoresFeatures(t *testing.T) {
 	if cause != ie.CauseRequestAccepted {
 		t.Fatalf("UpdateAssociation() cause = %d, want Request Accepted", cause)
 	}
-	if afterResponse != nil {
-		t.Fatal("feature-only update returned unexpected release work")
+	if afterResponse == nil {
+		t.Fatal("feature-only update did not prepare deferred feature commit")
 	}
 	featureIE.Payload[0] = 0xff
+	if got := upf.UPFunctionFeatures(); len(got) != 0 {
+		t.Fatalf("features changed before response: %v", got)
+	}
+	afterResponse()
 	got := upf.UPFunctionFeatures()
 	if len(got) != 2 || got[0] != 0x21 || got[1] != 0x43 {
 		t.Fatalf("stored UP Function Features = %v, want [0x21 0x43]", got)
+	}
+}
+
+func TestProcessorPassiveAssociationUpdateRejectsInvalidRequestWithoutChangingFeatures(t *testing.T) {
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.91").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+	upf.EstablishAssociation(context.Background())
+	t.Cleanup(upf.CancelAssociation)
+	upf.SetUPFunctionFeatures([]byte{0x01, 0x02})
+
+	// A malformed later IE must not commit the already parsed Features IE.
+	invalidPeriod := ie.NewGracefulReleasePeriod(time.Second)
+	invalidPeriod.Payload = nil
+	processor := &Processor{}
+	cause, afterResponse := processor.UpdateAssociation(nodeID, message.NewAssociationUpdateRequest(
+		1,
+		ie.NewUPFunctionFeatures(0x21, 0x43),
+		ie.NewPFCPAssociationReleaseRequest(1, 0),
+		invalidPeriod,
+	))
+	if cause != ie.CauseInvalidLength || afterResponse != nil {
+		t.Fatalf("UpdateAssociation() cause=%d callback=%t, want invalid length without callback",
+			cause, afterResponse != nil)
+	}
+	if got := upf.UPFunctionFeatures(); len(got) != 2 || got[0] != 0x01 || got[1] != 0x02 {
+		t.Fatalf("features changed after rejected update: %v", got)
 	}
 }
 
@@ -504,16 +538,28 @@ func TestProcessorPassiveAssociationUpdateURSSDoesNotRelease(t *testing.T) {
 	p := &Processor{}
 
 	cause, afterResponse := p.UpdateAssociation(nodeID, message.NewAssociationUpdateRequest(
-		1, ie.NewPFCPAssociationReleaseRequest(0, 1),
+		1, ie.NewUPFunctionFeatures(0x11, 0x22), ie.NewPFCPAssociationReleaseRequest(0, 1),
 	))
-	if cause != ie.CauseRequestAccepted {
-		t.Fatalf("UpdateAssociation() cause = %d, want Request Accepted", cause)
+	if cause != ie.CauseRequestAccepted || afterResponse == nil {
+		t.Fatalf("UpdateAssociation() cause=%d callback=%t, want deferred feature commit",
+			cause, afterResponse != nil)
 	}
-	if afterResponse != nil {
-		t.Fatal("URSS-only Association Update unexpectedly started release work")
+	if got := upf.UPFunctionFeatures(); len(got) != 0 {
+		t.Fatalf("URSS update changed features before response: %v", got)
+	}
+	afterResponse()
+	if got := upf.UPFunctionFeatures(); len(got) != 2 || got[0] != 0x11 || got[1] != 0x22 {
+		t.Fatalf("URSS update did not commit features: %v", got)
 	}
 	if err := upf.IsAssociated(); err != nil {
 		t.Fatalf("URSS-only Association Update changed association state: %v", err)
+	}
+	cause, afterResponse = p.UpdateAssociation(nodeID, message.NewAssociationUpdateRequest(
+		2, ie.NewPFCPAssociationReleaseRequest(0, 1),
+	))
+	if cause != ie.CauseRequestAccepted || afterResponse != nil {
+		t.Fatalf("URSS-only update cause=%d callback=%t, want accepted without callback",
+			cause, afterResponse != nil)
 	}
 }
 
@@ -528,14 +574,14 @@ func TestProcessorPassiveAssociationUpdateReleasesAfterResponse(t *testing.T) {
 	associationContext := upf.EstablishAssociation(pfcpContext)
 	upf.RecoveryTimeStamp = time.Now()
 	t.Cleanup(upf.CancelAssociation)
-	releaseCalled := false
+	releaseCount := 0
 	p := &Processor{}
 	p.SetActivePFCPClient(&fakeActivePFCPClient{
 		releaseCtx: func(ctx context.Context, addr *net.UDPAddr) (*message.AssociationReleaseResponse, error) {
 			if ctx != associationContext {
 				t.Errorf("Association Release Request did not use the UPF association context")
 			}
-			releaseCalled = true
+			releaseCount++
 			if got, want := addr.IP.String(), "192.0.2.84"; got != want {
 				t.Fatalf("release destination IP = %s, want %s", got, want)
 			}
@@ -551,21 +597,33 @@ func TestProcessorPassiveAssociationUpdateReleasesAfterResponse(t *testing.T) {
 	})
 
 	cause, afterResponse := p.UpdateAssociation(nodeID, message.NewAssociationUpdateRequest(
-		1, ie.NewPFCPAssociationReleaseRequest(1, 0),
+		1, ie.NewUPFunctionFeatures(0x21, 0x43), ie.NewPFCPAssociationReleaseRequest(1, 0),
 	))
 	if cause != ie.CauseRequestAccepted || afterResponse == nil {
 		t.Fatalf("UpdateAssociation() cause = %d, afterResponse present = %t; want accepted release work",
 			cause, afterResponse != nil)
 	}
-	if releaseCalled {
+	if releaseCount != 0 {
 		t.Fatal("Association Release was sent before afterResponse")
+	}
+	if got := upf.UPFunctionFeatures(); len(got) != 0 {
+		t.Fatalf("features changed before afterResponse: %v", got)
 	}
 	if err := upf.IsAssociated(); err != nil {
 		t.Fatalf("association was canceled before afterResponse: %v", err)
 	}
 	afterResponse()
-	if !releaseCalled {
-		t.Fatal("Association Release was not sent by afterResponse")
+	if got := upf.UPFunctionFeatures(); len(got) != 2 || got[0] != 0x21 || got[1] != 0x43 {
+		t.Fatalf("features were not committed before release: %v", got)
+	}
+	if releaseCount != 1 {
+		t.Fatalf("Association Release calls = %d, want 1", releaseCount)
+	}
+	// BeginAssociationRelease prevents a duplicate cleanup even if a caller
+	// mistakenly invokes the same callback again.
+	afterResponse()
+	if releaseCount != 1 {
+		t.Fatalf("Association Release calls after duplicate callback = %d, want 1", releaseCount)
 	}
 	if err := upf.IsAssociated(); err == nil {
 		t.Fatal("UPF remains associated after Association Release")

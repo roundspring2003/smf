@@ -2,6 +2,7 @@ package pfcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -14,7 +15,9 @@ import (
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 
+	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
+	"github.com/free5gc/smf/internal/sbi/processor"
 	"github.com/free5gc/smf/pkg/factory"
 )
 
@@ -1777,5 +1780,386 @@ func TestReceiverContinuesAfterTransientUDPReadError(t *testing.T) {
 	}
 	if got := connection.readCount.Load(); got < 2 {
 		t.Fatalf("ReadFromUDP() calls = %d, want at least 2", got)
+	}
+}
+
+type scriptedResponseConn struct {
+	writes     chan error
+	closed     chan struct{}
+	closeOnce  sync.Once
+	writeCount atomic.Int32
+}
+
+func (c *scriptedResponseConn) ReadFromUDP([]byte) (int, *net.UDPAddr, error) {
+	<-c.closed
+	return 0, nil, net.ErrClosed
+}
+
+func (c *scriptedResponseConn) WriteToUDP(packet []byte, _ *net.UDPAddr) (int, error) {
+	if c.writeCount.Add(1) == 1 {
+		err := errors.New("injected response write failure")
+		c.writes <- err
+		return 0, err
+	}
+	c.writes <- nil
+	return len(packet), nil
+}
+
+func (c *scriptedResponseConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: PfcpPort}
+}
+
+func (c *scriptedResponseConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func waitForResponseWrite(t *testing.T, writes <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-writes:
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("PFCP response write did not occur")
+		return nil
+	}
+}
+
+func TestFailedResponseWriteDeletesRxTransaction(t *testing.T) {
+	connection := &scriptedResponseConn{writes: make(chan error, 4), closed: make(chan struct{})}
+	server := NewPfcpServer(&fakeSmf{cfg: &factory.Config{}}, "127.0.0.1")
+	server.conn = connection
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.81"), Port: PfcpPort}
+	rx := server.newRxTransaction(peer, 91)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(1)
+	go server.main(&waitGroup)
+	t.Cleanup(func() { server.Stop(); waitGroup.Wait() })
+
+	err := server.SendPfcpResponse(message.NewHeartbeatResponse(
+		91, ie.NewRecoveryTimeStamp(time.Now()),
+	), peer)
+	if err == nil || !strings.Contains(err.Error(), "injected response write failure") {
+		t.Fatalf("SendPfcpResponse() error = %v, want write failure", err)
+	}
+	if writeErr := waitForResponseWrite(t, connection.writes); writeErr == nil {
+		t.Fatal("first response write unexpectedly succeeded")
+	}
+	if _, found := server.loadRxTransaction(rx.id); found {
+		t.Fatal("failed response retained its RxTransaction")
+	}
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	if !rx.done || len(rx.msgBuf) != 0 || rx.timer != nil {
+		t.Fatalf("failed response state: done=%t cache=%d timer=%v", rx.done, len(rx.msgBuf), rx.timer)
+	}
+}
+
+func TestFailedAssociationUpdateResponseIsHandledAgainOnRetransmission(t *testing.T) {
+	connection := &scriptedResponseConn{writes: make(chan error, 4), closed: make(chan struct{})}
+	server := NewPfcpServer(&fakeSmf{cfg: &factory.Config{}}, "127.0.0.1")
+	server.conn = connection
+	manager := &fakeAssociationState{updateCause: ie.CauseRequestAccepted}
+	var committed atomic.Int32
+	committedCh := make(chan struct{}, 2)
+	manager.after = func() {
+		committed.Add(1)
+		committedCh <- struct{}{}
+	}
+	server.SetAssociationStateManager(manager)
+	var handled atomic.Int32
+	server.SetDispatch(func(msg message.Message, addr *net.UDPAddr) {
+		handled.Add(1)
+		server.Dispatch(msg, addr)
+	})
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+	go server.main(&waitGroup)
+	go server.dispatcher(&waitGroup)
+	t.Cleanup(func() { server.Stop(); waitGroup.Wait() })
+
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.82"), Port: PfcpPort}
+	request := message.NewAssociationUpdateRequest(92, ie.NewNodeIDHeuristic("192.0.2.82"))
+	id := TransactionID(peer, request.Sequence())
+	server.transactionHandler(request, peer)
+	if err := waitForResponseWrite(t, connection.writes); err == nil {
+		t.Fatal("first response write unexpectedly succeeded")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, found := server.loadRxTransaction(id); !found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed RxTransaction was not deleted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := committed.Load(); got != 0 {
+		t.Fatalf("callback count after failed response = %d, want 0", got)
+	}
+
+	server.transactionHandler(request, peer)
+	if err := waitForResponseWrite(t, connection.writes); err != nil {
+		t.Fatalf("retransmitted response write failed: %v", err)
+	}
+	select {
+	case <-committedCh:
+	case <-time.After(time.Second):
+		t.Fatal("successful response did not commit afterResponse")
+	}
+	if got := handled.Load(); got != 2 {
+		t.Fatalf("handler calls after retry = %d, want 2", got)
+	}
+	server.transactionHandler(request, peer)
+	if err := waitForResponseWrite(t, connection.writes); err != nil {
+		t.Fatalf("cached response replay failed: %v", err)
+	}
+	if got := handled.Load(); got != 2 {
+		t.Fatalf("handler calls after cached replay = %d, want 2", got)
+	}
+	if got := committed.Load(); got != 1 {
+		t.Fatalf("callback count after cached replay = %d, want 1", got)
+	}
+}
+
+type associationReleaseTestClient struct {
+	releaseCount atomic.Int32
+	released     chan struct{}
+}
+
+func (*associationReleaseTestClient) SendAssociationSetupRequest(
+	context.Context, *net.UDPAddr,
+) (*message.AssociationSetupResponse, error) {
+	return nil, nil
+}
+
+func (*associationReleaseTestClient) SendHeartbeatRequest(
+	context.Context, *net.UDPAddr,
+) (*message.HeartbeatResponse, error) {
+	return nil, nil
+}
+
+func (c *associationReleaseTestClient) SendAssociationReleaseRequest(
+	context.Context, *net.UDPAddr,
+) (*message.AssociationReleaseResponse, error) {
+	c.releaseCount.Add(1)
+	c.released <- struct{}{}
+	return message.NewAssociationReleaseResponse(
+		1, ie.NewNodeIDHeuristic("192.0.2.85"), ie.NewCause(ie.CauseRequestAccepted),
+	), nil
+}
+
+func TestAssociationUpdateFeaturesAndSARRCommitOnlyAfterSuccessfulResponse(t *testing.T) {
+	connection := &scriptedResponseConn{writes: make(chan error, 4), closed: make(chan struct{})}
+	server := NewPfcpServer(&fakeSmf{cfg: &factory.Config{}}, "127.0.0.1")
+	server.conn = connection
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.85").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+	upf.SetUPFunctionFeatures([]byte{0x01, 0x02})
+	pfcpSelf := smf_context.GetSelf()
+	previousContext := pfcpSelf.PfcpContext
+	pfcpContext, cancelPFCP := context.WithCancel(context.Background())
+	pfcpSelf.PfcpContext = pfcpContext
+	t.Cleanup(func() {
+		pfcpSelf.PfcpContext = previousContext
+		cancelPFCP()
+	})
+	upf.EstablishAssociation(pfcpContext)
+	t.Cleanup(upf.CancelAssociation)
+	client := &associationReleaseTestClient{released: make(chan struct{}, 2)}
+	manager := &processor.Processor{}
+	manager.SetActivePFCPClient(client)
+	server.SetAssociationStateManager(manager)
+	var handled atomic.Int32
+	server.SetDispatch(func(msg message.Message, addr *net.UDPAddr) {
+		handled.Add(1)
+		server.Dispatch(msg, addr)
+	})
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+	go server.main(&waitGroup)
+	go server.dispatcher(&waitGroup)
+	t.Cleanup(func() { server.Stop(); waitGroup.Wait() })
+
+	peer := &net.UDPAddr{IP: nodeID.IP, Port: PfcpPort}
+	request := message.NewAssociationUpdateRequest(
+		95,
+		ie.NewNodeIDHeuristic(nodeID.IP.String()),
+		ie.NewUPFunctionFeatures(0x21, 0x43),
+		ie.NewPFCPAssociationReleaseRequest(1, 0),
+	)
+	id := TransactionID(peer, request.Sequence())
+	server.transactionHandler(request, peer)
+	if err := waitForResponseWrite(t, connection.writes); err == nil {
+		t.Fatal("first response write unexpectedly succeeded")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, found := server.loadRxTransaction(id); !found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed response transaction was not removed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := upf.UPFunctionFeatures(); len(got) != 2 || got[0] != 0x01 || got[1] != 0x02 {
+		t.Fatalf("features changed after failed response: %v", got)
+	}
+	if err := upf.IsAssociated(); err != nil {
+		t.Fatalf("SARR changed association after failed response: %v", err)
+	}
+	if got := client.releaseCount.Load(); got != 0 {
+		t.Fatalf("Association Release requests after failed response = %d, want 0", got)
+	}
+
+	server.transactionHandler(request, peer)
+	if err := waitForResponseWrite(t, connection.writes); err != nil {
+		t.Fatalf("retried response write failed: %v", err)
+	}
+	select {
+	case <-client.released:
+	case <-time.After(time.Second):
+		t.Fatal("successful response did not begin association release")
+	}
+	if got := upf.UPFunctionFeatures(); len(got) != 2 || got[0] != 0x21 || got[1] != 0x43 {
+		t.Fatalf("features after successful response = %v, want [0x21 0x43]", got)
+	}
+	server.transactionHandler(request, peer)
+	if err := waitForResponseWrite(t, connection.writes); err != nil {
+		t.Fatalf("cached response replay failed: %v", err)
+	}
+	if got := handled.Load(); got != 2 {
+		t.Fatalf("handler calls = %d, want 2", got)
+	}
+	if got := client.releaseCount.Load(); got != 1 {
+		t.Fatalf("Association Release requests = %d, want 1", got)
+	}
+}
+
+type blockedResponseConn struct {
+	started   chan struct{}
+	release   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *blockedResponseConn) ReadFromUDP([]byte) (int, *net.UDPAddr, error) {
+	<-c.closed
+	return 0, nil, net.ErrClosed
+}
+
+func (c *blockedResponseConn) WriteToUDP(packet []byte, _ *net.UDPAddr) (int, error) {
+	close(c.started)
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	case <-c.release:
+		return len(packet), nil
+	}
+}
+
+func (c *blockedResponseConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: PfcpPort}
+}
+
+func (c *blockedResponseConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestResponseWriteRacesWithTimerAndOldTransactionCannotDeleteReplacement(t *testing.T) {
+	connection := &blockedResponseConn{
+		started: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{}),
+	}
+	server := NewPfcpServer(&fakeSmf{cfg: &factory.Config{}}, "127.0.0.1")
+	server.conn = connection
+	t.Cleanup(server.Stop)
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.83"), Port: PfcpPort}
+	rx := server.newRxTransaction(peer, 93)
+	rx.mu.Lock()
+	staleGeneration := rx.timerGeneration
+	rx.mu.Unlock()
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- rx.send(message.NewHeartbeatResponse(
+			93, ie.NewRecoveryTimeStamp(time.Now()),
+		))
+	}()
+	select {
+	case <-connection.started:
+	case <-time.After(time.Second):
+		t.Fatal("response write did not start")
+	}
+	expireDone := make(chan struct{})
+	go func() { rx.expire(staleGeneration); close(expireDone) }()
+	close(connection.release)
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("response write failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response write deadlocked with timer")
+	}
+	select {
+	case <-expireDone:
+	case <-time.After(time.Second):
+		t.Fatal("timer callback did not finish")
+	}
+	if current, found := server.loadRxTransaction(rx.id); !found || current != rx {
+		t.Fatal("stale timer deleted a successfully cached response")
+	}
+	replacement := server.newRxTransaction(peer, 93)
+	defer replacement.stop()
+	rx.stop()
+	if current, found := server.loadRxTransaction(rx.id); !found || current != replacement {
+		t.Fatal("old transaction deleted its replacement")
+	}
+}
+
+func TestResponseWriteUnblocksOnServerShutdown(t *testing.T) {
+	connection := &blockedResponseConn{
+		started: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{}),
+	}
+	server := NewPfcpServer(&fakeSmf{cfg: &factory.Config{}}, "127.0.0.1")
+	server.conn = connection
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.84"), Port: PfcpPort}
+	server.newRxTransaction(peer, 94)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(1)
+	go server.main(&waitGroup)
+	t.Cleanup(func() { server.Stop(); waitGroup.Wait() })
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- server.SendPfcpResponse(message.NewHeartbeatResponse(
+			94, ie.NewRecoveryTimeStamp(time.Now()),
+		), peer)
+	}()
+	select {
+	case <-connection.started:
+	case <-time.After(time.Second):
+		t.Fatal("response write did not start")
+	}
+	server.Stop()
+	select {
+	case err := <-sendDone:
+		if err == nil {
+			t.Fatal("response write succeeded after server shutdown")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendPfcpResponse deadlocked during shutdown")
+	}
+	finished := make(chan struct{})
+	go func() { waitGroup.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("PFCP main loop did not stop after failed write")
 	}
 }

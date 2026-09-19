@@ -26,8 +26,8 @@ func (p *Processor) SetupAssociation(
 	return ie.CauseRequestAccepted, nil
 }
 
-// UpdateAssociation applies an update only to an association that is currently
-// established. Release work is deferred until the Update Response has been sent.
+// UpdateAssociation prepares changes only for an established association.
+// Feature updates and release work commit after the Update Response is sent.
 func (p *Processor) UpdateAssociation(
 	peer pfcptype.NodeID,
 	request *message.AssociationUpdateRequest,
@@ -39,12 +39,13 @@ func (p *Processor) UpdateAssociation(
 	if upf == nil || upf.IsAssociated() != nil {
 		return ie.CauseNoEstablishedPFCPAssociation, nil
 	}
+	var features []byte
 	if request.UPFunctionFeatures != nil {
-		features, err := request.UPFunctionFeatures.UPFunctionFeatures()
-		if err != nil || len(features) < 2 {
+		parsed, err := request.UPFunctionFeatures.UPFunctionFeatures()
+		if err != nil || len(parsed) < 2 {
 			return ie.CauseInvalidLength, nil
 		}
-		upf.SetUPFunctionFeatures(features)
+		features = append([]byte(nil), parsed...)
 	}
 	if request.PFCPAUReqFlags != nil && request.PFCPAUReqFlags.HasPARPS() {
 		logger.PfcpLog.Warnf(
@@ -54,20 +55,14 @@ func (p *Processor) UpdateAssociation(
 	}
 
 	releaseRequest := request.PFCPAssociationReleaseRequest
-	if releaseRequest == nil {
-		return ie.CauseRequestAccepted, nil
-	}
-	if releaseRequest.HasURSS() {
+	releaseRequested := releaseRequest != nil && releaseRequest.HasSARR()
+	if releaseRequest != nil && releaseRequest.HasURSS() {
 		logger.PfcpLog.Infof(
 			"UPF[%s] reported that non-zero Usage Reports for affected PFCP Sessions were sent",
 			peer.String(),
 		)
 	}
 	// URSS reports what the UPF has already sent; only SARR requests release.
-	if !releaseRequest.HasSARR() {
-		return ie.CauseRequestAccepted, nil
-	}
-
 	var gracefulReleasePeriod *time.Duration
 	if request.GracefulReleasePeriod != nil {
 		period, err := request.GracefulReleasePeriod.GracefulReleasePeriod()
@@ -76,8 +71,16 @@ func (p *Processor) UpdateAssociation(
 		}
 		gracefulReleasePeriod = &period
 	}
+	if len(features) == 0 && !releaseRequested {
+		return ie.CauseRequestAccepted, nil
+	}
 	return ie.CauseRequestAccepted, func() {
-		p.releaseAssociationRequestedByUPF(upf, gracefulReleasePeriod)
+		if len(features) != 0 {
+			upf.SetUPFunctionFeatures(features)
+		}
+		if releaseRequested {
+			p.releaseAssociationRequestedByUPF(upf, gracefulReleasePeriod)
+		}
 	}
 }
 
