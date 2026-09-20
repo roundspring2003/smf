@@ -3,9 +3,11 @@ package processor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,6 +191,339 @@ func TestActiveAssociationLoopUsesAssociationContextForHeartbeat(t *testing.T) {
 	case <-loopDone:
 	case <-time.After(time.Second):
 		t.Fatal("association loop did not stop after PFCP parent cancellation")
+	}
+}
+
+func waitForAssociationEstablished(t *testing.T, upf *smf_context.UPF) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+	for {
+		if upf.AssociationState() == smf_context.AssociationEstablished {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatal("UPF association did not reach Established state")
+		}
+	}
+}
+
+func TestAssociationLifecycleWithoutHeartbeatWaitsCleansAndReconnects(t *testing.T) {
+	initAssociationReleaseTestContext(t)
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.20").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+
+	smContext := smf_context.NewSMContext("imsi-heartbeat-disabled", 1)
+	t.Cleanup(func() { smf_context.RemoveSMContext(smContext.Ref) })
+	smContext.PFCPContext[nodeID.String()] = &smf_context.PFCPSessionContext{
+		NodeID: nodeID, LocalSEID: 1001, RemoteSEID: 2001,
+	}
+
+	smfSelf := smf_context.GetSelf()
+	previousHeartbeatInterval := smfSelf.PfcpHeartbeatInterval
+	smfSelf.PfcpHeartbeatInterval = 0
+	t.Cleanup(func() { smfSelf.PfcpHeartbeatInterval = previousHeartbeatInterval })
+
+	recoveryTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+	setupCalls := make(chan int, 3)
+	heartbeatCalls := make(chan struct{}, 1)
+	var setupCount atomic.Int32
+	p := &Processor{}
+	p.SetActivePFCPClient(&fakeActivePFCPClient{
+		setup: func(*net.UDPAddr) (*message.AssociationSetupResponse, error) {
+			call := int(setupCount.Add(1))
+			if call == 2 {
+				smContext.SMLock.Lock()
+				remoteSEID := smContext.PFCPContext[nodeID.String()].RemoteSEID
+				smContext.SMLock.Unlock()
+				if remoteSEID != 0 {
+					return nil, fmt.Errorf("second setup started with stale RemoteSEID %d", remoteSEID)
+				}
+			}
+			setupCalls <- call
+			return message.NewAssociationSetupResponse(
+				uint32(call),
+				ie.NewNodeIDHeuristic(nodeID.String()),
+				ie.NewCause(ie.CauseRequestAccepted),
+				ie.NewRecoveryTimeStamp(recoveryTime),
+			), nil
+		},
+		heartbeat: func(*net.UDPAddr) (*message.HeartbeatResponse, error) {
+			heartbeatCalls <- struct{}{}
+			return nil, errors.New("heartbeat must be disabled")
+		},
+	})
+
+	parentContext, cancelParent := context.WithCancel(context.Background())
+	t.Cleanup(cancelParent)
+	loopDone := make(chan struct{})
+	go func() {
+		p.ToBeAssociatedWithUPF(parentContext, upf)
+		close(loopDone)
+	}()
+
+	select {
+	case call := <-setupCalls:
+		if call != 1 {
+			t.Fatalf("first setup call = %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial Association Setup was not sent")
+	}
+	waitForAssociationEstablished(t, upf)
+	select {
+	case <-heartbeatCalls:
+		t.Fatal("Heartbeat was sent while PfcpHeartbeatInterval is zero")
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case <-loopDone:
+		t.Fatal("association lifecycle exited while Heartbeat was disabled")
+	default:
+	}
+
+	if cause := p.ReleaseAssociation(nodeID); cause != ie.CauseRequestAccepted {
+		t.Fatalf("ReleaseAssociation() cause = %d", cause)
+	}
+	select {
+	case call := <-setupCalls:
+		if call != 2 {
+			t.Fatalf("reconnect setup call = %d, want 2", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Association Release did not trigger reconnection")
+	}
+
+	cancelParent()
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("association lifecycle did not stop during SMF shutdown")
+	}
+	select {
+	case call := <-setupCalls:
+		t.Fatalf("Association Setup call %d occurred after SMF shutdown", call)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestPassiveAssociationSetupRestartWakesHeartbeatDisabledLifecycleOnce(t *testing.T) {
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.21").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+
+	smfSelf := smf_context.GetSelf()
+	previousHeartbeatInterval := smfSelf.PfcpHeartbeatInterval
+	smfSelf.PfcpHeartbeatInterval = 0
+	t.Cleanup(func() { smfSelf.PfcpHeartbeatInterval = previousHeartbeatInterval })
+
+	oldRecoveryTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+	newRecoveryTime := oldRecoveryTime.Add(time.Minute)
+	setupCalls := make(chan int, 3)
+	var setupCount atomic.Int32
+	p := &Processor{}
+	p.SetActivePFCPClient(&fakeActivePFCPClient{
+		setup: func(*net.UDPAddr) (*message.AssociationSetupResponse, error) {
+			call := int(setupCount.Add(1))
+			setupCalls <- call
+			recoveryTime := oldRecoveryTime
+			if call > 1 {
+				recoveryTime = newRecoveryTime
+			}
+			return message.NewAssociationSetupResponse(
+				uint32(call), ie.NewNodeIDHeuristic(nodeID.String()),
+				ie.NewCause(ie.CauseRequestAccepted), ie.NewRecoveryTimeStamp(recoveryTime),
+			), nil
+		},
+		heartbeat: func(*net.UDPAddr) (*message.HeartbeatResponse, error) {
+			return nil, errors.New("unexpected Heartbeat")
+		},
+	})
+
+	parentContext, cancelParent := context.WithCancel(context.Background())
+	t.Cleanup(cancelParent)
+	loopDone := make(chan struct{})
+	go func() {
+		p.ToBeAssociatedWithUPF(parentContext, upf)
+		close(loopDone)
+	}()
+	select {
+	case <-setupCalls:
+	case <-time.After(time.Second):
+		t.Fatal("initial Association Setup was not sent")
+	}
+	waitForAssociationEstablished(t, upf)
+
+	cause, firstCallback := p.SetupAssociation(nodeID, newRecoveryTime)
+	if cause != ie.CauseRequestAccepted || firstCallback == nil {
+		t.Fatalf("first passive Setup cause=%d callback=%t", cause, firstCallback != nil)
+	}
+	_, duplicateCallback := p.SetupAssociation(nodeID, newRecoveryTime)
+	if duplicateCallback == nil {
+		t.Fatal("duplicate passive Setup did not return a callback")
+	}
+	if err := upf.IsAssociated(); err != nil {
+		t.Fatalf("association changed before Setup Response: %v", err)
+	}
+	firstCallback()
+	duplicateCallback()
+
+	select {
+	case call := <-setupCalls:
+		if call != 2 {
+			t.Fatalf("restart setup call = %d, want 2", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new passive Recovery Time Stamp did not trigger reconnection")
+	}
+	select {
+	case call := <-setupCalls:
+		t.Fatalf("duplicate restart event triggered setup call %d", call)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancelParent()
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("association lifecycle did not stop")
+	}
+}
+
+func TestPassiveAssociationSetupRecoveryTimeSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		baseline   time.Time
+		incoming   time.Time
+		wantCancel bool
+	}{
+		{name: "first baseline", incoming: time.Unix(100, 0)},
+		{name: "unchanged", baseline: time.Unix(100, 0), incoming: time.Unix(100, 0)},
+		{name: "newer means restart", baseline: time.Unix(100, 0), incoming: time.Unix(101, 0), wantCancel: true},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			nodeID := pfcptype.NodeID{
+				NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+				IP:         net.IPv4(192, 0, 2, byte(30+index)).To4(),
+			}
+			upf := smf_context.NewUPF(&nodeID, nil)
+			t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+			upf.EstablishAssociation(context.Background())
+			if !test.baseline.IsZero() {
+				upf.SetRecoveryTimeStamp(test.baseline)
+			}
+
+			cause, afterResponse := (&Processor{}).SetupAssociation(nodeID, test.incoming)
+			if cause != ie.CauseRequestAccepted || afterResponse == nil {
+				t.Fatalf("SetupAssociation() cause=%d callback=%t", cause, afterResponse != nil)
+			}
+			if test.baseline.IsZero() && !upf.RecoveryTimeStamp().IsZero() {
+				t.Fatal("first baseline was committed before response")
+			}
+			afterResponse()
+			if test.wantCancel {
+				if err := upf.IsAssociated(); err == nil {
+					t.Fatal("newer Recovery Time Stamp did not invalidate association")
+				}
+				return
+			}
+			if err := upf.IsAssociated(); err != nil {
+				t.Fatalf("Recovery Time Stamp incorrectly invalidated association: %v", err)
+			}
+			if got := upf.RecoveryTimeStamp(); !got.Equal(test.incoming) {
+				t.Fatalf("RecoveryTimeStamp() = %v, want %v", got, test.incoming)
+			}
+		})
+	}
+}
+
+func TestDelayedPassiveSetupCallbackDoesNotCancelReplacementAssociation(t *testing.T) {
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.40").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+	oldRecoveryTime := time.Unix(100, 0)
+	newRecoveryTime := time.Unix(200, 0)
+	upf.EstablishAssociation(context.Background())
+	upf.SetRecoveryTimeStamp(oldRecoveryTime)
+
+	_, delayedCallback := (&Processor{}).SetupAssociation(nodeID, newRecoveryTime)
+	upf.CancelAssociation()
+	upf.EstablishAssociation(context.Background())
+	upf.SetRecoveryTimeStamp(newRecoveryTime)
+	delayedCallback()
+
+	if err := upf.IsAssociated(); err != nil {
+		t.Fatalf("delayed callback canceled replacement association: %v", err)
+	}
+	if got := upf.RecoveryTimeStamp(); !got.Equal(newRecoveryTime) {
+		t.Fatalf("replacement RecoveryTimeStamp() = %v, want %v", got, newRecoveryTime)
+	}
+}
+
+func TestAssociationLifecycleHasSingleOwner(t *testing.T) {
+	nodeID := pfcptype.NodeID{
+		NodeIdType: pfcptype.NodeIdTypeIpv4Address,
+		IP:         net.ParseIP("192.0.2.41").To4(),
+	}
+	upf := smf_context.NewUPF(&nodeID, nil)
+	t.Cleanup(func() { smf_context.RemoveUPFNodeByNodeID(nodeID) })
+	parentContext, cancelParent := context.WithCancel(context.Background())
+
+	setupStarted := make(chan struct{}, 1)
+	var setupCount atomic.Int32
+	p := &Processor{}
+	p.SetActivePFCPClient(&fakeActivePFCPClient{
+		setupCtx: func(ctx context.Context, _ *net.UDPAddr) (*message.AssociationSetupResponse, error) {
+			setupCount.Add(1)
+			setupStarted <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+
+	ownersDone := make(chan struct{}, 2)
+	go func() {
+		p.ToBeAssociatedWithUPF(parentContext, upf)
+		ownersDone <- struct{}{}
+	}()
+	select {
+	case <-setupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle owner did not start setup")
+	}
+	go func() {
+		p.ToBeAssociatedWithUPF(parentContext, upf)
+		ownersDone <- struct{}{}
+	}()
+	select {
+	case <-ownersDone:
+	case <-time.After(time.Second):
+		t.Fatal("second lifecycle caller did not return")
+	}
+	if got := setupCount.Load(); got != 1 {
+		t.Fatalf("concurrent lifecycle setup calls = %d, want 1", got)
+	}
+
+	cancelParent()
+	select {
+	case <-ownersDone:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle owner did not stop")
 	}
 }
 
@@ -444,16 +779,23 @@ func TestProcessorPassiveAssociationStateUsesConfiguredUPF(t *testing.T) {
 	peer := nodeID
 	p := &Processor{}
 
-	cause, afterResponse := p.SetupAssociation(peer, time.Now())
+	recoveryTime := time.Now().Add(-time.Minute).Truncate(time.Second)
+	cause, afterResponse := p.SetupAssociation(peer, recoveryTime)
 	if cause != ie.CauseRequestAccepted {
 		t.Fatalf("SetupAssociation() cause = %d, want Request Accepted", cause)
 	}
-	if afterResponse != nil {
-		t.Fatal("SetupAssociation() returned unexpected recovery work")
+	if afterResponse == nil {
+		t.Fatal("SetupAssociation() did not defer recovery-time commit")
+	}
+	if !upf.RecoveryTimeStamp().IsZero() {
+		t.Fatal("SetupAssociation() committed recovery time before response")
+	}
+	afterResponse()
+	if got := upf.RecoveryTimeStamp(); !got.Equal(recoveryTime) {
+		t.Fatalf("RecoveryTimeStamp() = %v, want %v", got, recoveryTime)
 	}
 
 	upf.EstablishAssociation(context.Background())
-	upf.SetRecoveryTimeStamp(time.Now())
 	if cause = p.ReleaseAssociation(peer); cause != ie.CauseRequestAccepted {
 		t.Fatalf("ReleaseAssociation() cause = %d, want Request Accepted", cause)
 	}

@@ -82,6 +82,7 @@ type UPF struct {
 	associationContext    context.Context
 	cancelAssociation     context.CancelFunc
 	associationGeneration uint64
+	associationLifecycle  bool
 
 	upFunctionFeaturesMu sync.RWMutex
 	upFunctionFeatures   []byte
@@ -150,11 +151,61 @@ func (upf *UPF) AcceptRecoveryTimeStamp(recoveryTime time.Time) bool {
 	return !upf.recoveryTimeStamp.Before(recoveryTime)
 }
 
+// AcceptRecoveryTimeStampForGeneration applies the heartbeat recovery-time
+// comparison only while the association generation observed by the caller is
+// still current. The second result reports a newer UPF recovery timestamp.
+func (upf *UPF) AcceptRecoveryTimeStampForGeneration(
+	generation uint64,
+	recoveryTime time.Time,
+) (currentGeneration bool, restarted bool) {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	if upf.associationGeneration != generation {
+		return false, false
+	}
+
+	upf.recoveryTimeStampMu.Lock()
+	defer upf.recoveryTimeStampMu.Unlock()
+	if upf.recoveryTimeStamp.IsZero() {
+		upf.recoveryTimeStamp = recoveryTime
+		return true, false
+	}
+	return true, upf.recoveryTimeStamp.Before(recoveryTime)
+}
+
 // AssociationState returns the current node-level PFCP association state.
 func (upf *UPF) AssociationState() UPFAssociationState {
 	upf.associationMu.RLock()
 	defer upf.associationMu.RUnlock()
 	return upf.associationState
+}
+
+// AssociationStateAndGeneration returns one consistent lifecycle snapshot for
+// work that must not affect a replacement association.
+func (upf *UPF) AssociationStateAndGeneration() (UPFAssociationState, uint64) {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	return upf.associationState, upf.associationGeneration
+}
+
+// BeginAssociationLifecycle elects one goroutine to own setup, monitoring,
+// cleanup and reconnect ion for this configured UPF.
+func (upf *UPF) BeginAssociationLifecycle() bool {
+	upf.associationMu.Lock()
+	defer upf.associationMu.Unlock()
+	if upf.associationLifecycle {
+		return false
+	}
+	upf.associationLifecycle = true
+	return true
+}
+
+// EndAssociationLifecycle releases lifecycle ownership during SMF shutdown or
+// when the owner cannot continue.
+func (upf *UPF) EndAssociationLifecycle() {
+	upf.associationMu.Lock()
+	upf.associationLifecycle = false
+	upf.associationMu.Unlock()
 }
 
 // BeginAssociationSetup moves a disconnected UPF into setup state. It returns
@@ -209,17 +260,43 @@ func (upf *UPF) EstablishAssociation(parent context.Context) context.Context {
 	return associationContext
 }
 
-// CancelAssociation synchronously marks the UPF disconnected, then wakes
-// goroutines waiting on AssociationDone.
+// CancelAssociation synchronously marks the UPF disconnected, clears the
+// recovery-time baseline, then wakes goroutines waiting on AssociationDone.
 func (upf *UPF) CancelAssociation() {
 	upf.associationMu.Lock()
-	cancel := upf.cancelAssociation
-	upf.associationGeneration++
-	upf.associationState = AssociationDown
+	cancel := upf.cancelAssociationLocked()
 	upf.associationMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// CancelAssociationIfGeneration invalidates only the association generation
+// observed by the caller. A delayed callback from an older generation is a
+// no-op and cannot tear down a replacement association.
+func (upf *UPF) CancelAssociationIfGeneration(generation uint64) bool {
+	upf.associationMu.Lock()
+	if upf.associationGeneration != generation {
+		upf.associationMu.Unlock()
+		return false
+	}
+	cancel := upf.cancelAssociationLocked()
+	upf.associationMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
+}
+
+// cancelAssociationLocked requires associationMu to be held for writing.
+func (upf *UPF) cancelAssociationLocked() context.CancelFunc {
+	cancel := upf.cancelAssociation
+	upf.associationGeneration++
+	upf.associationState = AssociationDown
+	upf.recoveryTimeStampMu.Lock()
+	upf.recoveryTimeStamp = time.Time{}
+	upf.recoveryTimeStampMu.Unlock()
+	return cancel
 }
 
 // AssociationDone exposes only the cancellation signal; association state is
@@ -315,6 +392,30 @@ func (upf *UPF) IsAvailable() error {
 			upf.NodeID.ResolveNodeIdToIp().String(), state)
 	}
 	return nil
+}
+
+// InvalidatePFCPSessions clears every remote SEID belonging to this UPF before
+// the lifecycle can establish a replacement association. It returns the number
+// of live PFCP sessions invalidated.
+func (upf *UPF) InvalidatePFCPSessions() int {
+	invalidated := 0
+	smContextPool.Range(func(_, value interface{}) bool {
+		smContext, ok := value.(*SMContext)
+		if !ok || smContext == nil {
+			return true
+		}
+		smContext.SMLock.Lock()
+		for _, pfcpSession := range smContext.PFCPContext {
+			if pfcpSession != nil && pfcpSession.RemoteSEID != 0 &&
+				pfcpSession.NodeID.EqualsTo(&upf.NodeID) {
+				pfcpSession.RemoteSEID = 0
+				invalidated++
+			}
+		}
+		smContext.SMLock.Unlock()
+		return true
+	})
+	return invalidated
 }
 
 // CollectAssociationReleasePDUSessions returns each PDU Session that currently

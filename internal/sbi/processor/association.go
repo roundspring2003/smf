@@ -39,6 +39,12 @@ func (p *Processor) getActivePFCPClient() ActivePFCPClient {
 }
 
 func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *smf_context.UPF) {
+	if !upf.BeginAssociationLifecycle() {
+		logger.MainLog.Infof("PFCP association lifecycle for UPF%s already has an owner", formatUPF(upf))
+		return
+	}
+	defer upf.EndAssociationLifecycle()
+
 	upfStr := formatUPF(upf)
 	for {
 		select {
@@ -54,15 +60,19 @@ func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *s
 			return
 		}
 		if smf_context.GetSelf().PfcpHeartbeatInterval == 0 {
-			return
-		}
-		if err := p.keepHeartbeatTo(associationContext, upf, upfStr); err != nil {
+			p.waitForAssociationCancellation(smfPfcpContext, associationContext, upfStr)
+		} else if err := p.keepHeartbeatTo(associationContext, upf, upfStr); err != nil {
 			logger.MainLog.Errorf("PFCP Heartbeat error: %v", err)
 		}
 
 		// Heartbeat loss, a changed Recovery Time Stamp, or external
 		// association cancellation invalidates every PFCP session on this UPF.
 		p.releaseAllResourcesOfUPF(upf, upfStr)
+		if smfPfcpContext.Err() != nil {
+			upf.CancelAssociation()
+			logger.MainLog.Infoln("Canceled SMF PFCP context")
+			return
+		}
 	}
 }
 
@@ -114,6 +124,10 @@ func (p *Processor) ensureSetupPfcpAssociation(
 				alertTime = now
 			}
 		}
+		if parentContext.Err() != nil {
+			logger.MainLog.Infoln("Canceled SMF PFCP context")
+			return nil, false
+		}
 
 		timer := time.NewTimer(retryInterval)
 		select {
@@ -164,6 +178,19 @@ func (p *Processor) setupPfcpAssociation(
 	return nil
 }
 
+func (p *Processor) waitForAssociationCancellation(
+	parentContext context.Context,
+	associationContext context.Context,
+	upfStr string,
+) {
+	select {
+	case <-associationContext.Done():
+		logger.MainLog.Infof("Canceled association to UPF[%s]", upfStr)
+	case <-parentContext.Done():
+		logger.MainLog.Infoln("Canceled SMF PFCP context")
+	}
+}
+
 func (p *Processor) keepHeartbeatTo(
 	ctx context.Context,
 	upf *smf_context.UPF,
@@ -199,9 +226,11 @@ func (p *Processor) doPfcpHeartbeat(
 		return fmt.Errorf("cancel heartbeat: %+v", err)
 	}
 
+	_, associationGeneration := upf.AssociationStateAndGeneration()
 	logger.MainLog.Debugf("Sending PFCP Heartbeat Request to UPF%s", upfStr)
 	client := p.getActivePFCPClient()
 	if client == nil {
+		upf.CancelAssociationIfGeneration(associationGeneration)
 		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
@@ -210,37 +239,49 @@ func (p *Processor) doPfcpHeartbeat(
 		Port: pfcpPeerPort,
 	})
 	if err != nil {
-		cancelUPFAssociation(upf)
+		upf.CancelAssociationIfGeneration(associationGeneration)
 		return fmt.Errorf("SendHeartbeatRequest error: %w", err)
 	}
 	if response == nil || response.RecoveryTimeStamp == nil {
-		cancelUPFAssociation(upf)
+		upf.CancelAssociationIfGeneration(associationGeneration)
 		return fmt.Errorf("PFCP Heartbeat Response from UPF%s is missing Recovery Time Stamp", upfStr)
 	}
 	recoveryTime, err := response.RecoveryTimeStamp.RecoveryTimeStamp()
 	if err != nil {
-		cancelUPFAssociation(upf)
+		upf.CancelAssociationIfGeneration(associationGeneration)
 		return fmt.Errorf("decode PFCP Heartbeat Recovery Time Stamp from UPF%s: %w", upfStr, err)
 	}
-	return acceptHeartbeatRecoveryTime(upf, upfStr, recoveryTime)
+	return acceptHeartbeatRecoveryTime(upf, upfStr, associationGeneration, recoveryTime)
 }
 
-func acceptHeartbeatRecoveryTime(upf *smf_context.UPF, upfStr string, recoveryTime time.Time) error {
+func acceptHeartbeatRecoveryTime(
+	upf *smf_context.UPF,
+	upfStr string,
+	associationGeneration uint64,
+	recoveryTime time.Time,
+) error {
 	logger.MainLog.Debugf("Received PFCP Heartbeat Response from UPF%s", upfStr)
-	if upf.AcceptRecoveryTimeStamp(recoveryTime) {
+	current, restarted := upf.AcceptRecoveryTimeStampForGeneration(associationGeneration, recoveryTime)
+	if !current {
+		return fmt.Errorf("discard PFCP Heartbeat Response from stale association generation")
+	}
+	if !restarted {
 		return nil
 	}
-	cancelUPFAssociation(upf)
+	upf.CancelAssociationIfGeneration(associationGeneration)
 	return fmt.Errorf("received PFCP Heartbeat Response RecoveryTimeStamp has been updated")
 }
 
 func cancelUPFAssociation(upf *smf_context.UPF) {
 	upf.CancelAssociation()
-	upf.SetRecoveryTimeStamp(time.Time{})
 }
 
 func (p *Processor) releaseAllResourcesOfUPF(upf *smf_context.UPF, upfStr string) {
 	logger.MainLog.Infof("Release all resources of UPF %s", upfStr)
+	invalidated := upf.InvalidatePFCPSessions()
+	if invalidated != 0 {
+		logger.MainLog.Infof("Invalidated %d PFCP sessions for UPF%s", invalidated, upfStr)
+	}
 
 	upf.ProcEachSMContext(func(smContext *smf_context.SMContext) {
 		smContext.SMLock.Lock()

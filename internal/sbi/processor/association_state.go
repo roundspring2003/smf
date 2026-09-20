@@ -13,17 +13,37 @@ import (
 	"github.com/free5gc/smf/internal/pfcp/pfcptype"
 )
 
-// SetupAssociation adapts the new passive Association handler to the existing
-// configured UPF registry. Active Association/Heartbeat remains the authority
-// that drives the UPF association lifecycle and detects UPF restart.
+// SetupAssociation validates a passive setup against the configured UPF and
+// defers recovery-time handling until its response has been sent. A newer
+// timestamp invalidates the current generation; the lifecycle owner performs
+// session cleanup and re-establishment after its association context closes.
 func (p *Processor) SetupAssociation(
 	peer pfcptype.NodeID,
-	_ time.Time,
+	recoveryTime time.Time,
 ) (uint8, func()) {
-	if smf_context.RetrieveUPFNodeByNodeID(peer) == nil {
+	upf := smf_context.RetrieveUPFNodeByNodeID(peer)
+	if upf == nil {
 		return ie.CauseRequestRejected, nil
 	}
-	return ie.CauseRequestAccepted, nil
+	_, generation := upf.AssociationStateAndGeneration()
+	return ie.CauseRequestAccepted, func() {
+		state, currentGeneration := upf.AssociationStateAndGeneration()
+		if currentGeneration != generation {
+			return
+		}
+		current, restarted := upf.AcceptRecoveryTimeStampForGeneration(generation, recoveryTime)
+		if !current || !restarted {
+			return
+		}
+		if state != smf_context.AssociationEstablished && state != smf_context.AssociationReleasing {
+			return
+		}
+		logger.PfcpLog.Warnf(
+			"UPF[%s] sent Association Setup with a newer Recovery Time Stamp; invalidating association generation %d",
+			peer.String(), generation,
+		)
+		upf.CancelAssociationIfGeneration(generation)
+	}
 }
 
 // UpdateAssociation prepares changes only for an established association.
