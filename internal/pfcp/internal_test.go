@@ -2163,3 +2163,88 @@ func TestResponseWriteUnblocksOnServerShutdown(t *testing.T) {
 		t.Fatal("PFCP main loop did not stop after failed write")
 	}
 }
+
+func TestUnsupportedNodeRequestsReturnCachedRejection(t *testing.T) {
+	server := startDispatcherRecoveryServer(t, 1)
+	var handled atomic.Int32
+	server.SetDispatch(func(msg message.Message, addr *net.UDPAddr) {
+		handled.Add(1)
+		server.Dispatch(msg, addr)
+	})
+
+	peer, err := net.DialUDP("udp", nil, server.LocalAddr())
+	if err != nil {
+		t.Fatalf("DialUDP() error: %v", err)
+	}
+	defer func() {
+		if closeErr := peer.Close(); closeErr != nil {
+			t.Errorf("Close() error: %v", closeErr)
+		}
+	}()
+
+	tests := []struct {
+		name     string
+		request  message.Message
+		response func(message.Message) *ie.IE
+	}{
+		{
+			name: "NodeReport",
+			request: message.NewNodeReportRequest(
+				81, ie.NewNodeIDHeuristic("192.0.2.91"), ie.NewNodeReportType(0x01),
+			),
+			response: func(msg message.Message) *ie.IE {
+				rsp, ok := msg.(*message.NodeReportResponse)
+				if !ok {
+					t.Fatalf("response type = %T, want *message.NodeReportResponse", msg)
+				}
+				return rsp.Cause
+			},
+		},
+		{
+			name: "SessionSetDeletion",
+			request: message.NewSessionSetDeletionRequest(
+				82, ie.NewNodeIDHeuristic("192.0.2.91"), nil,
+			),
+			response: func(msg message.Message) *ie.IE {
+				rsp, ok := msg.(*message.SessionSetDeletionResponse)
+				if !ok {
+					t.Fatalf("response type = %T, want *message.SessionSetDeletionResponse", msg)
+				}
+				return rsp.Cause
+			},
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			packet := make([]byte, test.request.MarshalLen())
+			if marshalErr := test.request.MarshalTo(packet); marshalErr != nil {
+				t.Fatalf("MarshalTo() error: %v", marshalErr)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, writeErr := peer.Write(packet); writeErr != nil {
+					t.Fatalf("Write() error: %v", writeErr)
+				}
+				if deadlineErr := peer.SetReadDeadline(time.Now().Add(time.Second)); deadlineErr != nil {
+					t.Fatalf("SetReadDeadline() error: %v", deadlineErr)
+				}
+				responsePacket := make([]byte, 2048)
+				n, readErr := peer.Read(responsePacket)
+				if readErr != nil {
+					t.Fatalf("Read() error: %v", readErr)
+				}
+				response, parseErr := message.Parse(responsePacket[:n])
+				if parseErr != nil {
+					t.Fatalf("Parse() error: %v", parseErr)
+				}
+				if got, want := response.Sequence(), test.request.Sequence(); got != want {
+					t.Fatalf("response sequence = %#x, want %#x", got, want)
+				}
+				assertCause(t, test.response(response), ie.CauseServiceNotSupported)
+			}
+			if got, want := handled.Load(), int32(index+1); got != want {
+				t.Fatalf("dispatch count after retransmission = %d, want %d", got, want)
+			}
+		})
+	}
+}

@@ -101,3 +101,46 @@ func TestBuildSessionModificationRequestMapsUpdatesDirectly(t *testing.T) {
 	require.Equal(t, context.RULE_CREATE, far.State)
 	require.Equal(t, context.RULE_CREATE, smContext.GetUrrState(upfUUID, urr.URRID))
 }
+
+func TestBuildSessionModificationUpdateURRKeepsVolumeThresholdSemantics(t *testing.T) {
+	initDirectBuilderTestContext(t)
+	const (
+		upfIP      = "10.4.0.3"
+		upfUUID    = "modification-threshold-upf"
+		localSEID  = uint64(303)
+		remoteSEID = uint64(404)
+	)
+	smContext := context.NewSMContext("imsi-208930000000104", 10)
+	smContext.PFCPContext[upfIP] = &context.PFCPSessionContext{
+		LocalSEID: localSEID, RemoteSEID: remoteSEID,
+	}
+	urr := &context.URR{
+		URRID:           45,
+		MeasureMethod:   context.MesureMethodVol,
+		VolumeThreshold: 1_000,
+	}
+	smContext.RegisterUrr(upfUUID, urr)
+	smContext.SetUrrState(upfUUID, urr.URRID, context.RULE_UPDATE)
+
+	request, err := pfcp_message.BuildSessionModificationRequest(
+		upfIP, upfUUID, smContext, nil, nil, nil, nil, []*context.URR{urr},
+	)
+	require.NoError(t, err)
+	wire, err := request.Marshal()
+	require.NoError(t, err)
+	parsedMessage, err := goPfcpMessage.Parse(wire)
+	require.NoError(t, err)
+	parsed, ok := parsedMessage.(*goPfcpMessage.SessionModificationRequest)
+	require.True(t, ok, "parsed message type = %T", parsedMessage)
+	require.Len(t, parsed.UpdateURR, 1)
+
+	urrChildren, err := parsed.UpdateURR[0].UpdateURR()
+	require.NoError(t, err)
+	threshold, err := findIE(t, urrChildren, ie.VolumeThreshold).VolumeThreshold()
+	require.NoError(t, err)
+	require.False(t, threshold.HasTOVOL())
+	require.True(t, threshold.HasULVOL())
+	require.True(t, threshold.HasDLVOL())
+	require.Equal(t, uint64(1_000), threshold.UplinkVolume)
+	require.Equal(t, uint64(1_000), threshold.DownlinkVolume)
+}

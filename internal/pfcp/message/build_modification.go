@@ -294,7 +294,7 @@ func newUpdateURRIE(urr *context.URR) (*ie.IE, error) {
 	}
 	if urr.VolumeThreshold != 0 {
 		children = append(children, ie.NewVolumeThreshold(
-			0x07, urr.VolumeThreshold, urr.VolumeThreshold, urr.VolumeThreshold,
+			0x06, 0, urr.VolumeThreshold, urr.VolumeThreshold,
 		))
 	}
 	if urr.VolumeQuota != 0 {

@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )
 
@@ -32,14 +33,22 @@ func (s *PfcpServer) Dispatch(msg message.Message, addr *net.UDPAddr) {
 		response, afterResponse = s.handleAssociationUpdateRequest(request)
 	case *message.NodeReportRequest:
 		// TODO(go-pfcp migration): parse Node Report Type and the report-specific
-		// grouped IEs before returning a Node Report Response.
+		// grouped IEs. Until then, reject explicitly so the peer and RxTransaction
+		// both complete instead of waiting for a response that will never arrive.
 		s.log.Warnf("PFCP Node Report Request handling is not implemented (sequence=%#x from=%v)",
 			request.Sequence(), addr)
+		response = message.NewNodeReportResponse(
+			request.Sequence(), s.localNodeIDIE(), ie.NewCause(ie.CauseServiceNotSupported), nil,
+		)
 	case *message.SessionSetDeletionRequest:
-		// TODO(go-pfcp migration): identify the targeted session set, coordinate
-		// SM-context cleanup and return a Session Set Deletion Response.
+		// TODO(go-pfcp migration): identify the targeted session set and coordinate
+		// SM-context cleanup. Return an explicit rejection while unsupported so the
+		// request transaction can complete and cache a replayable response.
 		s.log.Warnf("PFCP Session Set Deletion Request handling is not implemented (sequence=%#x from=%v)",
 			request.Sequence(), addr)
+		response = message.NewSessionSetDeletionResponse(
+			request.Sequence(), s.localNodeIDIE(), ie.NewCause(ie.CauseServiceNotSupported), nil,
+		)
 	case *message.SessionReportRequest:
 		response = s.handleSessionReportRequest(request)
 	default:
