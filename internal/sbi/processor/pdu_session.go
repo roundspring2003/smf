@@ -389,6 +389,8 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 	defer smContext.SMLock.Unlock()
 
 	var sendPFCPModification bool
+	var createdIndirectForwarding bool
+	var removeIndirectForwardingAfterSuccess bool
 	var pfcpResponseStatus smf_context.PFCPSessionResponseStatus
 	var response models.UpdateSmContextResponse200
 	response.JsonData = new(models.Smf_PDUSess_SmContextUpdatedData)
@@ -1036,27 +1038,47 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 			relatedBytes(body.BinaryDataN2SmInformation), smContext)
 		if err != nil {
 			smContext.Log.Errorf("Handle HandoverRequestAcknowledgeTransfer failed: %+v", err)
+			smContext.SetState(smf_context.Active)
+			// TODO: Classify handover errors before mapping them to an HTTP response.
+			// Malformed NGAP input, missing local tunnel state, TEID exhaustion, and
+			// an unavailable/releasing UPF should not all become UPF_NOT_AVAILABLE.
+			problemDetail := models.Smf_PDUSess_ExtProblemDetails{
+				Status: http.StatusServiceUnavailable,
+				Cause:  "UPF_NOT_AVAILABLE",
+			}
+			c.Set(sbi.IN_PB_DETAILS_CTX_STR, problemDetail.Cause)
+			c.JSON(http.StatusServiceUnavailable, models.UpdateSmContextResponse400{
+				JsonData: &models.Smf_PDUSess_SmContextUpdateError{Error: &problemDetail},
+			})
+			return
 		}
 
 		// request UPF establish indirect forwarding path for DL
 		if smContext.DLForwardingType == smf_context.IndirectForwarding {
-			ANUPF := smContext.IndirectForwardingTunnel.FirstDPNode
 			IndirectForwardingPDR := smContext.IndirectForwardingTunnel.FirstDPNode.UpLinkTunnel.PDR
 
 			pdrList = append(pdrList, IndirectForwardingPDR)
 			farList = append(farList, IndirectForwardingPDR.FAR)
-
-			// release indirect forwading path
-			if err = ANUPF.UPF.RemovePDR(IndirectForwardingPDR); err != nil {
-				logger.PduSessLog.Errorln("release indirect path: ", err)
-			}
-
+			createdIndirectForwarding = true
 			sendPFCPModification = true
 			smContext.SetState(smf_context.PFCPModification)
 		}
 
 		if n2Buf, err = smf_context.BuildHandoverCommandTransfer(smContext); err != nil {
 			smContext.Log.Errorf("Build HandoverCommandTransfer failed: %v", err)
+			if createdIndirectForwarding {
+				smContext.RemoveIndirectForwardingTunnel()
+			}
+			smContext.SetState(smf_context.Active)
+			problemDetail := models.Smf_PDUSess_ExtProblemDetails{
+				Status: http.StatusInternalServerError,
+				Cause:  "SYSTEM_FAILURE",
+			}
+			c.Set(sbi.IN_PB_DETAILS_CTX_STR, problemDetail.Cause)
+			c.JSON(http.StatusInternalServerError, models.UpdateSmContextResponse400{
+				JsonData: &models.Smf_PDUSess_SmContextUpdateError{Error: &problemDetail},
+			})
+			return
 		} else {
 			response.BinaryDataN2SmInformation = related("HANDOVER_CMD", n2Buf)
 			response.JsonData.N2SmInfoType = models.Smf_PDUSess_N2SmInfoType_HANDOVER_CMD
@@ -1088,6 +1110,7 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 			indirectForwardingPDR.FAR.State = smf_context.RULE_REMOVE
 			pdrList = append(pdrList, indirectForwardingPDR)
 			farList = append(farList, indirectForwardingPDR.FAR)
+			removeIndirectForwardingAfterSuccess = true
 		}
 
 		sendPFCPModification = true
@@ -1140,10 +1163,16 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 		switch pfcpResponseStatus {
 		case smf_context.SessionUpdateSuccess:
 			smContext.Log.Traceln("In case SessionUpdateSuccess")
+			if removeIndirectForwardingAfterSuccess {
+				smContext.RemoveIndirectForwardingTunnel()
+			}
 			smContext.SetState(smf_context.Active)
 			c.Render(http.StatusOK, openapi.MultipartRelatedRender{Data: response})
 		case smf_context.SessionUpdateFailed:
 			smContext.Log.Traceln("In case SessionUpdateFailed")
+			if createdIndirectForwarding {
+				smContext.RemoveIndirectForwardingTunnel()
+			}
 			smContext.SetState(smf_context.Active)
 			// It is just a template
 			updateSmContextError := models.UpdateSmContextResponse400{

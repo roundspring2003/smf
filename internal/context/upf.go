@@ -386,12 +386,34 @@ func (upf *UPF) IsAssociationReleasing() bool {
 // a fully established association. Releasing remains associated for reports
 // and Session Deletion, but is not available for new session work.
 func (upf *UPF) IsAvailable() error {
-	state := upf.AssociationState()
-	if state != AssociationEstablished {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	return upf.isAvailableLocked()
+}
+
+// isAvailableLocked reports whether new work may be added to the current
+// association. The caller must hold associationMu for reading or writing.
+func (upf *UPF) isAvailableLocked() error {
+	if upf.associationState != AssociationEstablished {
 		return fmt.Errorf("UPF[%s] is not available for PFCP session work (association state=%s)",
-			upf.NodeID.ResolveNodeIdToIp().String(), state)
+			upf.NodeID.ResolveNodeIdToIp().String(), upf.associationState)
 	}
 	return nil
+}
+
+// ruleAllocationAvailableLocked preserves the historical "not associated"
+// error for Down/SettingUp while giving Releasing the stricter availability
+// semantics required for new rule allocation.
+func (upf *UPF) ruleAllocationAvailableLocked() error {
+	if upf.associationState == AssociationEstablished {
+		return nil
+	}
+	if upf.associationState == AssociationReleasing {
+		return fmt.Errorf("UPF[%s] is not available for new PFCP rule allocation (association state=%s)",
+			upf.NodeID.ResolveNodeIdToIp().String(), upf.associationState)
+	}
+	return fmt.Errorf("UPF[%s] not associated with SMF",
+		upf.NodeID.ResolveNodeIdToIp().String())
 }
 
 // InvalidatePFCPSessions clears every remote SEID belonging to this UPF before
@@ -718,10 +740,6 @@ func (upf *UPF) GetUPFID() string {
 }
 
 func (upf *UPF) pdrID() (pdrID uint16, err error) {
-	if err = upf.IsAssociated(); err != nil {
-		return
-	}
-
 	tmpID, err := upf.pdrIDGenerator.Allocate()
 	if err != nil {
 		return 0, err
@@ -731,10 +749,6 @@ func (upf *UPF) pdrID() (pdrID uint16, err error) {
 }
 
 func (upf *UPF) farID() (farID uint32, err error) {
-	if err = upf.IsAssociated(); err != nil {
-		return
-	}
-
 	tmpID, err := upf.farIDGenerator.Allocate()
 	if err != nil {
 		return 0, err
@@ -744,10 +758,6 @@ func (upf *UPF) farID() (farID uint32, err error) {
 }
 
 func (upf *UPF) barID() (barID uint8, err error) {
-	if err = upf.IsAssociated(); err != nil {
-		return
-	}
-
 	tmpID, err := upf.barIDGenerator.Allocate()
 	if err != nil {
 		return 0, err
@@ -757,10 +767,6 @@ func (upf *UPF) barID() (barID uint8, err error) {
 }
 
 func (upf *UPF) qerID() (qerID uint32, err error) {
-	if err = upf.IsAssociated(); err != nil {
-		return
-	}
-
 	tmpID, err := upf.qerIDGenerator.Allocate()
 	if err != nil {
 		return 0, err
@@ -779,17 +785,26 @@ func (upf *UPF) urrID() (urrID uint32, err error) {
 }
 
 func (upf *UPF) AddPDR() (pdr *PDR, err error) {
-	if err = upf.IsAssociated(); err != nil {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	if err = upf.ruleAllocationAvailableLocked(); err != nil {
 		return
 	}
+	return upf.addPDR()
+}
 
+// addPDR allocates a PDR and its FAR for work that already owns association
+// availability (for example, a BeginSessionWork reservation). It deliberately
+// does not acquire sessionWorkGate, avoiding recursive RWMutex read locking.
+func (upf *UPF) addPDR() (pdr *PDR, err error) {
 	pdrID, err := upf.pdrID()
 	if err != nil {
 		return
 	}
 
-	newFAR, err := upf.AddFAR()
+	newFAR, err := upf.addFAR()
 	if err != nil {
+		upf.pdrIDGenerator.FreeID(int64(pdrID))
 		return
 	}
 
@@ -802,10 +817,15 @@ func (upf *UPF) AddPDR() (pdr *PDR, err error) {
 }
 
 func (upf *UPF) AddFAR() (far *FAR, err error) {
-	if err = upf.IsAssociated(); err != nil {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	if err = upf.ruleAllocationAvailableLocked(); err != nil {
 		return
 	}
+	return upf.addFAR()
+}
 
+func (upf *UPF) addFAR() (far *FAR, err error) {
 	farID, err := upf.farID()
 	if err != nil {
 		return
@@ -818,7 +838,9 @@ func (upf *UPF) AddFAR() (far *FAR, err error) {
 }
 
 func (upf *UPF) AddBAR() (bar *BAR, err error) {
-	if err = upf.IsAssociated(); err != nil {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	if err = upf.ruleAllocationAvailableLocked(); err != nil {
 		return
 	}
 
@@ -834,7 +856,9 @@ func (upf *UPF) AddBAR() (bar *BAR, err error) {
 }
 
 func (upf *UPF) AddQER() (qer *QER, err error) {
-	if err = upf.IsAssociated(); err != nil {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	if err = upf.ruleAllocationAvailableLocked(); err != nil {
 		return
 	}
 
@@ -850,7 +874,9 @@ func (upf *UPF) AddQER() (qer *QER, err error) {
 }
 
 func (upf *UPF) AddURR(urrID uint32, opts ...UrrOpt) (urr *URR, err error) {
-	if err = upf.IsAssociated(); err != nil {
+	upf.associationMu.RLock()
+	defer upf.associationMu.RUnlock()
+	if err = upf.ruleAllocationAvailableLocked(); err != nil {
 		return
 	}
 
@@ -873,6 +899,21 @@ func (upf *UPF) AddURR(urrID uint32, opts ...UrrOpt) (urr *URR, err error) {
 
 	upf.urrPool.Store(urr.URRID, urr)
 	return
+}
+
+// discardPDRAndFAR rolls back a PDR/FAR pair that has not been published to a
+// session. It must remain usable after Association Release changes the state to
+// Releasing (or an independent failure cancels the association).
+func (upf *UPF) discardPDRAndFAR(pdr *PDR) {
+	if pdr == nil {
+		return
+	}
+	upf.pdrPool.Delete(pdr.PDRID)
+	upf.pdrIDGenerator.FreeID(int64(pdr.PDRID))
+	if pdr.FAR != nil {
+		upf.farPool.Delete(pdr.FAR.FARID)
+		upf.farIDGenerator.FreeID(int64(pdr.FAR.FARID))
+	}
 }
 
 func (upf *UPF) GetUUID() uuid.UUID {
