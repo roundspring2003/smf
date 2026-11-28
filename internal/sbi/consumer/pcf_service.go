@@ -208,10 +208,18 @@ func (s *npcfService) SendSMPolicyAssociationUpdateByUERequestModification(
 	return s.updateSMPolicyAssociation(smContext.SMPolicyID, &smContext.SelectedPCFProfile, &updateSMPolicy)
 }
 
-func (s *npcfService) SendSMPolicyAllocationReport(
-	policyID string, profile *models.Nrf_NFDisc_NFProfile, report *models.Pcf_SMPolCtrl_SmPolicyUpdateContextData,
+func (s *npcfService) ReportSuccessfulResourceAllocation(
+	policyID string, profile *models.Nrf_NFDisc_NFProfile, ruleIDs []string,
 ) error {
-	_, err := s.updateSMPolicyAssociation(policyID, profile, report)
+	_, err := s.updateSMPolicyAssociation(policyID, profile, &models.Pcf_SMPolCtrl_SmPolicyUpdateContextData{
+		RepPolicyCtrlReqTriggers: []models.Pcf_SMPolCtrl_PolicyControlRequestTrigger{
+			models.Pcf_SMPolCtrl_PolicyControlRequestTrigger_SUCC_RES_ALLO,
+		},
+		RuleReports: []models.Pcf_SMPolCtrl_RuleReport{{
+			PccRuleIds: ruleIDs,
+			RuleStatus: models.Pcf_SMPolCtrl_RuleStatus_ACTIVE,
+		}},
+	})
 	return err
 }
 

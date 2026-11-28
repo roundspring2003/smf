@@ -130,20 +130,28 @@ func (p *Processor) HandleSMPolicyUpdateNotify(
 	}
 	smContext.SetState(smf_context.ModificationPending)
 	defer smContext.SetState(smf_context.Active)
-	smContext.PendingPolicyAllocation = preparePolicyAllocation(smContext, decision)
+	allocation := preparePolicyAllocation(smContext, decision)
 
+	// Update SessionRule from decision
 	if err := smContext.ApplySessionRules(decision); err != nil {
+		// TODO: Fill the error body
 		smContext.Log.Errorf("SMPolicyUpdateNotify err: %v", err)
-		p.finishPolicyAllocation(smContext, false)
 		c.Status(http.StatusBadRequest)
 		return
 	}
+
+	// TODO: Response data type -
+	// [200 OK] UeCampingRep
+	// [200 OK] array(PartialSuccessReport)
+	// [400 Bad Request] ErrorReport
 	if err := smContext.ApplyPccRules(decision); err != nil {
-		smContext.Log.Errorf("apply sm policy decision error: %v", err)
-		p.finishPolicyAllocation(smContext, true)
+		smContext.Log.Errorf("apply sm policy decision error: %+v", err)
+		// TODO: Fill the error body
 		c.Status(http.StatusBadRequest)
 		return
 	}
+
+	smContext.PendingPolicyAllocation = allocation
 
 	smContext.SendUpPathChgNotification("EARLY", SendUpPathChgEventExposureNotification)
 	success := p.ActivateUPFSession(smContext, nil)
@@ -155,7 +163,7 @@ func (p *Processor) HandleSMPolicyUpdateNotify(
 	smContext.SendUpPathChgNotification("LATE", SendUpPathChgEventExposureNotification)
 	smContext.PostRemoveDataPath()
 
-	if allocation := smContext.PendingPolicyAllocation; allocation != nil {
+	if allocation != nil {
 		if err := p.requestPolicyAllocation(smContext, allocation); err != nil {
 			smContext.Log.Warnf("Request NG-RAN resources for PCC rules: %v", err)
 			p.finishPolicyAllocation(smContext, true)

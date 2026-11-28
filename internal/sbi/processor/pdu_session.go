@@ -807,14 +807,10 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 			smContext.Log.Errorf("Handle PDUSessionResourceSetupResponseTransfer failed: %+v", err)
 		}
 	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_RSP:
-		flows, decodeErr := smf_context.HandlePDUSessionResourceModifyResponseTransfer(
-			relatedBytes(body.BinaryDataN2SmInformation), smContext)
-		if decodeErr != nil {
-			smContext.Log.Errorf("Handle PDUSessionResourceModifyResponseTransfer failed: %+v", decodeErr)
+		if err = smf_context.
+			HandlePDUSessionResourceModifyResponseTransfer(relatedBytes(body.BinaryDataN2SmInformation), smContext); err != nil {
+			smContext.Log.Errorf("Handle PDUSessionResourceModifyResponseTransfer failed: %+v", err)
 		}
-		p.handlePolicyAllocationResponse(smContext, flows)
-	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_FAIL:
-		p.finishPolicyAllocation(smContext, true)
 	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_IND:
 		// This handler only processes changes in the number of tunnels:
 		// 1. Single tunnel to dual tunnels (1->2)
@@ -1099,6 +1095,8 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 		smContext.SetState(smf_context.ModificationPending)
 		response.JsonData.N2SmInfo = &models.RefToBinaryData{ContentId: "Handover"}
 	}
+
+	p.completePolicyAllocationFromN2(smContext, smContextUpdateData.N2SmInfoType)
 
 	switch smContextUpdateData.HoState {
 	case models.Smf_PDUSess_HoState_PREPARING:

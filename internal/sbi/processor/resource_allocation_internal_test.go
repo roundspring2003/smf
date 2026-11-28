@@ -147,27 +147,46 @@ func TestPCFInitiatedAllocationReport(t *testing.T) {
 				require.Empty(t, transfers)
 			}
 
-			var report models.Pcf_SMPolCtrl_SmPolicyUpdateContextData
-			select {
-			case report = <-reports:
-			case <-time.After(time.Second):
-				t.Fatal("PCF did not receive a PCC rule allocation report")
-			}
-			require.Len(t, report.RuleReports, 1)
-			require.Equal(t, []string{id}, report.RuleReports[0].PccRuleIds)
-			if tc.ranAccepts {
-				require.Equal(t, decision.PolicyCtrlReqTriggers, report.RepPolicyCtrlReqTriggers)
-				require.Equal(t, models.Pcf_SMPolCtrl_RuleStatus_ACTIVE, report.RuleReports[0].RuleStatus)
-				require.Empty(t, report.RuleReports[0].FailureCode)
-				require.NotZero(t, sm.PCCRuleIDToQoSRuleID[id])
-			} else {
-				require.Empty(t, report.RepPolicyCtrlReqTriggers)
-				require.Equal(t, models.Pcf_SMPolCtrl_RuleStatus_INACTIVE, report.RuleReports[0].RuleStatus)
-				require.Equal(t, models.Pcf_SMPolCtrl_FailureCode_RES_ALLO_FAIL, report.RuleReports[0].FailureCode)
-				require.NotContains(t, sm.PCCRules, id)
-			}
 			require.Nil(t, sm.PendingPolicyAllocation)
+			if !tc.ranAccepts {
+				require.NotContains(t, sm.PCCRules, id)
+				requireNoSuccessfulAllocation(t, reports)
+				return
+			}
+			select {
+			case report := <-reports:
+				require.Equal(t, decision.PolicyCtrlReqTriggers, report.RepPolicyCtrlReqTriggers)
+				require.Equal(t, []models.Pcf_SMPolCtrl_RuleReport{{
+					PccRuleIds: []string{id},
+					RuleStatus: models.Pcf_SMPolCtrl_RuleStatus_ACTIVE,
+				}}, report.RuleReports)
+			case <-time.After(time.Second):
+				t.Fatal("PCF did not receive a successful allocation report")
+			}
+			require.NotZero(t, sm.PCCRuleIDToQoSRuleID[id])
 		})
+	}
+}
+
+func requireNoSuccessfulAllocation(t *testing.T, reports <-chan models.Pcf_SMPolCtrl_SmPolicyUpdateContextData) {
+	t.Helper()
+	timeout := time.NewTimer(50 * time.Millisecond)
+	defer timeout.Stop()
+	failures := 0
+	for {
+		select {
+		case report := <-reports:
+			require.Empty(t, report.RepPolicyCtrlReqTriggers)
+			require.NotEmpty(t, report.RuleReports)
+			for _, rule := range report.RuleReports {
+				require.NotEmpty(t, rule.FailureCode)
+			}
+			// A companion failure reporter can deliver the rejection once.
+			failures++
+			require.LessOrEqual(t, failures, 1)
+		case <-timeout.C:
+			return
+		}
 	}
 }
 

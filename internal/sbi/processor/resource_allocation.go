@@ -149,6 +149,11 @@ func (p *Processor) requestPolicyAllocation(sm *smf_context.SMContext, allocatio
 	if transferErr := p.transferPolicyAllocation(sm, nas, n2); transferErr != nil {
 		return transferErr
 	}
+	for _, flow := range flows {
+		if previous := allocation.PreviousFlows[flow.QFI]; previous != nil && previous.State == smf_context.QoSFlowSet {
+			flow.State = smf_context.QoSFlowToBeModify
+		}
+	}
 
 	upi := smf_context.GetUserPlaneInformation()
 	allocation.Timer = time.AfterFunc(policyAllocationTimeout, func() {
@@ -230,18 +235,19 @@ func (p *Processor) transferPolicyAllocation(sm *smf_context.SMContext, nas, n2 
 	}
 }
 
-func (p *Processor) handlePolicyAllocationResponse(sm *smf_context.SMContext, flows map[uint8]bool) {
+func (p *Processor) completePolicyAllocationFromN2(
+	sm *smf_context.SMContext, infoType models.Smf_PDUSess_N2SmInfoType,
+) {
 	allocation := sm.PendingPolicyAllocation
 	if allocation == nil {
 		return
 	}
-	for ruleID, qfi := range allocation.RuleQFIs {
-		if success, found := flows[qfi]; found && qfi != 0 {
-			rule := sm.PCCRules[ruleID]
-			allocation.Outcomes[ruleID] = success && rule != nil && rule.QFI == qfi
+	switch infoType {
+	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_RSP:
+		if len(allocation.Outcomes) == len(allocation.RuleQFIs) {
+			p.finishPolicyAllocation(sm, true)
 		}
-	}
-	if len(allocation.Outcomes) == len(allocation.RuleQFIs) {
+	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_FAIL:
 		p.finishPolicyAllocation(sm, true)
 	}
 }
@@ -264,47 +270,39 @@ func (p *Processor) finishPolicyAllocation(sm *smf_context.SMContext, rollback b
 		return
 	}
 
-	report := models.Pcf_SMPolCtrl_SmPolicyUpdateContextData{}
+	var confirmed []string
 	for id := range allocation.RuleQFIs {
-		item := models.Pcf_SMPolCtrl_RuleReport{PccRuleIds: []string{id}, RuleStatus: models.Pcf_SMPolCtrl_RuleStatus_ACTIVE}
+		nasID := allocation.NewNasRuleIDs[id]
 		if allocation.Outcomes[id] {
 			delete(allocation.Rollback.PccRules, id)
-			if nasID := allocation.NewNasRuleIDs[id]; nasID != 0 {
+			if nasID != 0 {
 				sm.PCCRuleIDToQoSRuleID[id] = nasID
 			}
-			report.RepPolicyCtrlReqTriggers = []models.Pcf_SMPolCtrl_PolicyControlRequestTrigger{
-				models.Pcf_SMPolCtrl_PolicyControlRequestTrigger_SUCC_RES_ALLO,
-			}
-		} else {
-			item.RuleStatus = models.Pcf_SMPolCtrl_RuleStatus_INACTIVE
-			item.FailureCode = models.Pcf_SMPolCtrl_FailureCode_RES_ALLO_FAIL
-			if nasID := allocation.NewNasRuleIDs[id]; nasID != 0 {
-				sm.QoSRuleIDGenerator.FreeID(int64(nasID))
-			}
+			confirmed = append(confirmed, id)
+		} else if nasID != 0 {
+			sm.QoSRuleIDGenerator.FreeID(int64(nasID))
 		}
-		report.RuleReports = append(report.RuleReports, item)
 	}
 
-	restored := !rollback || len(allocation.Rollback.PccRules) == 0 || p.restorePolicyAllocation(sm, allocation)
-	for i := range report.RuleReports {
-		item := &report.RuleReports[i]
-		if restored && item.FailureCode != "" && allocation.PreviousRules[item.PccRuleIds[0]] != nil {
-			// A failed modification can leave the previously active rule in place.
-			item.RuleStatus = models.Pcf_SMPolCtrl_RuleStatus_ACTIVE
-		}
+	if rollback && len(allocation.Rollback.PccRules) != 0 {
+		p.restorePolicyAllocation(sm, allocation)
 	}
+	if len(confirmed) == 0 {
+		return
+	}
+	slices.Sort(confirmed)
 
 	policyID, profile, log := sm.SMPolicyID, sm.SelectedPCFProfile, sm.Log
 	if policyID != "" {
 		go func() {
-			if err := p.Consumer().SendSMPolicyAllocationReport(policyID, &profile, &report); err != nil {
-				log.Warnf("Send PCC rule allocation report: %v", err)
+			if err := p.Consumer().ReportSuccessfulResourceAllocation(policyID, &profile, confirmed); err != nil {
+				log.Warnf("Report successful resource allocation: %v", err)
 			}
 		}()
 	}
 }
 
-func (p *Processor) restorePolicyAllocation(sm *smf_context.SMContext, allocation *smf_context.PolicyAllocation) bool {
+func (p *Processor) restorePolicyAllocation(sm *smf_context.SMContext, allocation *smf_context.PolicyAllocation) {
 	// Only restore data referenced by a failed rule, to keep successful updates.
 	restoration := allocation.Rollback
 	decision := &models.Pcf_SMPolCtrl_SmPolicyDecision{
@@ -328,11 +326,11 @@ func (p *Processor) restorePolicyAllocation(sm *smf_context.SMContext, allocatio
 	}
 	if err := sm.ApplyPccRules(decision); err != nil {
 		sm.Log.Errorf("Restore PCC rules after rejected QoS modification: %v", err)
-		return false
+		return
 	}
 	if !p.ActivateUPFSession(sm, nil) {
 		sm.Log.Warn("UPF could not restore PCC rules after rejected QoS modification")
-		return false
+		return
 	}
 	for id := range decision.PccRules {
 		if rule := sm.PCCRules[id]; rule != nil && sm.AdditionalQosFlows[rule.QFI] != nil {
@@ -342,5 +340,4 @@ func (p *Processor) restorePolicyAllocation(sm *smf_context.SMContext, allocatio
 		}
 	}
 	sm.PostRemoveDataPath()
-	return true
 }
