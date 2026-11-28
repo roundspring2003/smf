@@ -580,6 +580,9 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 			smContext.StopT3591()
 		case *message.PDUSessModRej:
 			smContext.StopT3591()
+			if m.PTI == 0 {
+				p.finishPolicyAllocation(smContext, true)
+			}
 		}
 	}
 
@@ -804,10 +807,14 @@ func (p *Processor) HandlePDUSessionSMContextUpdate(
 			smContext.Log.Errorf("Handle PDUSessionResourceSetupResponseTransfer failed: %+v", err)
 		}
 	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_RSP:
-		if err = smf_context.
-			HandlePDUSessionResourceModifyResponseTransfer(relatedBytes(body.BinaryDataN2SmInformation), smContext); err != nil {
-			smContext.Log.Errorf("Handle PDUSessionResourceModifyResponseTransfer failed: %+v", err)
+		flows, decodeErr := smf_context.HandlePDUSessionResourceModifyResponseTransfer(
+			relatedBytes(body.BinaryDataN2SmInformation), smContext)
+		if decodeErr != nil {
+			smContext.Log.Errorf("Handle PDUSessionResourceModifyResponseTransfer failed: %+v", decodeErr)
 		}
+		p.handlePolicyAllocationResponse(smContext, flows)
+	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_FAIL:
+		p.finishPolicyAllocation(smContext, true)
 	case models.Smf_PDUSess_N2SmInfoType_PDU_RES_MOD_IND:
 		// This handler only processes changes in the number of tunnels:
 		// 1. Single tunnel to dual tunnels (1->2)

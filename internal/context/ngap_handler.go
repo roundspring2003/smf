@@ -92,12 +92,12 @@ func HandlePDUSessionResourceSetupResponseTransfer(b []byte, ctx *SMContext) err
 	return nil
 }
 
-func HandlePDUSessionResourceModifyResponseTransfer(b []byte, ctx *SMContext) error {
+func HandlePDUSessionResourceModifyResponseTransfer(b []byte, ctx *SMContext) (map[uint8]bool, error) {
 	resourceModifyResponseTransfer := ngapie.PDUSessionResourceModifyResponseTransfer{}
 
 	err := ngapie.UnmarshalBinary(b, &resourceModifyResponseTransfer)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if DLInfo := resourceModifyResponseTransfer.DLNGUUPTNLInformation; DLInfo != nil {
@@ -108,9 +108,11 @@ func HandlePDUSessionResourceModifyResponseTransfer(b []byte, ctx *SMContext) er
 		}
 	}
 
+	flows := make(map[uint8]bool)
 	if qosInfoList := resourceModifyResponseTransfer.QosFlowAddOrModifyResponseList; qosInfoList != nil {
 		for _, item := range qosInfoList.List {
 			qfi := uint8(item.QosFlowIdentifier.Value)
+			flows[qfi] = true
 			if qosFlow, ok := ctx.AdditionalQosFlows[qfi]; ok {
 				qosFlow.State = QoSFlowSet
 			} else {
@@ -122,6 +124,7 @@ func HandlePDUSessionResourceModifyResponseTransfer(b []byte, ctx *SMContext) er
 	if qosFailedInfoList := resourceModifyResponseTransfer.QosFlowFailedToAddOrModifyList; qosFailedInfoList != nil {
 		for _, item := range qosFailedInfoList.List {
 			qfi := uint8(item.QosFlowIdentifier.Value)
+			flows[qfi] = false
 			logger.PduSessLog.Warnf("PDU Session Resource Modify QFI[%d] %s",
 				qfi, strNgapCause(item.Cause))
 
@@ -133,7 +136,7 @@ func HandlePDUSessionResourceModifyResponseTransfer(b []byte, ctx *SMContext) er
 		}
 	}
 
-	return nil
+	return flows, nil
 }
 
 func HandlePDUSessionResourceModifyIndicationTransfer(b []byte, ctx *SMContext) error {

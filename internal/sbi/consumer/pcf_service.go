@@ -205,34 +205,39 @@ func (s *npcfService) SendSMPolicyAssociationUpdateByUERequestModification(
 		}
 	}
 
+	return s.updateSMPolicyAssociation(smContext.SMPolicyID, &smContext.SelectedPCFProfile, &updateSMPolicy)
+}
+
+func (s *npcfService) SendSMPolicyAllocationReport(
+	policyID string, profile *models.Nrf_NFDisc_NFProfile, report *models.Pcf_SMPolCtrl_SmPolicyUpdateContextData,
+) error {
+	_, err := s.updateSMPolicyAssociation(policyID, profile, report)
+	return err
+}
+
+func (s *npcfService) updateSMPolicyAssociation(
+	policyID string, profile *models.Nrf_NFDisc_NFProfile, update *models.Pcf_SMPolCtrl_SmPolicyUpdateContextData,
+) (*models.Pcf_SMPolCtrl_SmPolicyDecision, error) {
 	ctx, _, err := smf_context.GetSelf().
 		GetTokenCtxForNFInstance(models.Nrf_NFMgmt_ServiceName_NPCF_SMPOLICYCONTROL,
-			models.Nrf_NFMgmt_NFType_PCF, smContext.SelectedPCFProfile.NfInstanceId)
+			models.Nrf_NFMgmt_NFType_PCF, profile.NfInstanceId)
 	if err != nil {
 		return nil, err
 	}
-
-	var client *SMPolCtrl.APIClient
-
-	// Create SMPolicyControl Client for this SM Context
-	pcfURI := util.SearchNFServiceUri(&smContext.SelectedPCFProfile, models.Nrf_NFMgmt_ServiceName_NPCF_SMPOLICYCONTROL)
-	client = s.getSMPolicyControlClient(pcfURI)
-
+	pcfURI := util.SearchNFServiceUri(profile, models.Nrf_NFMgmt_ServiceName_NPCF_SMPOLICYCONTROL)
+	client := s.getSMPolicyControlClient(pcfURI)
 	if client == nil {
 		return nil, fmt.Errorf("SM Policy Control PCF API root unavailable")
 	}
-	var smPolicyDecision *models.Pcf_SMPolCtrl_SmPolicyDecision
-	request := &SMPolCtrl.UpdateSMPolicyRequest{
-		SmPolicyId:  &smContext.SMPolicyID,
-		RequestBody: &updateSMPolicy,
-	}
-
-	smPolicyDecisionFromPCF, err := client.IndividualSMPolicyDocumentApi.UpdateSMPolicy(ctx, request)
+	request := &SMPolCtrl.UpdateSMPolicyRequest{SmPolicyId: &policyID, RequestBody: update}
+	response, err := client.IndividualSMPolicyDocumentApi.UpdateSMPolicy(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("update sm policy [%s] association failed: %s", smContext.SMPolicyID, err)
+		return nil, fmt.Errorf("update sm policy [%s] association failed: %w", policyID, err)
 	}
-	smPolicyDecision = smPolicyDecisionFromPCF.Pcf_SMPolCtrl_SmPolicyDecision
-	return smPolicyDecision, nil
+	if response == nil {
+		return nil, nil
+	}
+	return response.Pcf_SMPolCtrl_SmPolicyDecision, nil
 }
 
 func parsePortRange(portRange string) []flowdesc.PortRange {

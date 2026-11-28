@@ -185,6 +185,7 @@ type SMContext struct {
 	SelectedSessionRuleID string
 
 	// QoS
+	PendingPolicyAllocation *PolicyAllocation
 	defRuleID               uint8
 	QoSRuleIDGenerator      *idgenerator.IDGenerator
 	PacketFilterIDGenerator *idgenerator.IDGenerator

@@ -108,33 +108,7 @@ func newUEQosModTestSession(t *testing.T, pfcpClient ActivePFCPClient) (*Process
 		t.Cleanup(node.UPF.CancelAssociation)
 	}
 
-	decision := models.Pcf_SMPolCtrl_SmPolicyDecision{
-		PccRules: map[string]*models.Pcf_SMPolCtrl_PccRule{"PccRuleId-2": {
-			PccRuleId: "PccRuleId-2", Precedence: 100,
-			RefQosData: []string{ueQosModTestQosID}, RefChgData: []string{ueQosModTestChgID},
-			FlowInfos: []models.Pcf_SMPolCtrl_FlowInformation{
-				{
-					FlowDescription: "permit out 17 from 192.0.2.201/32 9999 to assigned",
-					FlowDirection:   models.Pcf_SMPolCtrl_FlowDirectionRm_BIDIRECTIONAL,
-				},
-				{
-					FlowDescription: "permit out 17 from 192.0.2.202/32 9999 to assigned",
-					FlowDirection:   models.Pcf_SMPolCtrl_FlowDirectionRm_BIDIRECTIONAL,
-				},
-			},
-		}},
-		QosDecs: map[string]*models.Pcf_SMPolCtrl_QosData{ueQosModTestQosID: {
-			QosId: ueQosModTestQosID, Var5qi: 9,
-			Arp: &models.Arp{
-				PriorityLevel: 8,
-				PreemptCap:    models.PreemptionCapability_NOT_PREEMPT,
-				PreemptVuln:   models.PreemptionVulnerability_NOT_PREEMPTABLE,
-			},
-		}},
-		ChgDecs: map[string]*models.Pcf_SMPolCtrl_ChargingData{ueQosModTestChgID: {
-			ChgId: ueQosModTestChgID, RatingGroup: 2, Offline: true,
-		}},
-	}
+	decision := ueQosModTestDecision()
 	// PCF stub reachable with HTTP/2 over cleartext (prior knowledge), as the
 	// openapi clients use for http URIs.
 	pcf := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,6 +172,36 @@ func newUEQosModTestSession(t *testing.T, pfcpClient ActivePFCPClient) (*Process
 
 	p.SetActivePFCPClient(pfcpClient)
 	return p, sm
+}
+
+func ueQosModTestDecision() models.Pcf_SMPolCtrl_SmPolicyDecision {
+	return models.Pcf_SMPolCtrl_SmPolicyDecision{
+		PccRules: map[string]*models.Pcf_SMPolCtrl_PccRule{"PccRuleId-2": {
+			PccRuleId: "PccRuleId-2", Precedence: 100,
+			RefQosData: []string{ueQosModTestQosID}, RefChgData: []string{ueQosModTestChgID},
+			FlowInfos: []models.Pcf_SMPolCtrl_FlowInformation{
+				{
+					FlowDescription: "permit out 17 from 192.0.2.201/32 9999 to assigned",
+					FlowDirection:   models.Pcf_SMPolCtrl_FlowDirectionRm_BIDIRECTIONAL,
+				},
+				{
+					FlowDescription: "permit out 17 from 192.0.2.202/32 9999 to assigned",
+					FlowDirection:   models.Pcf_SMPolCtrl_FlowDirectionRm_BIDIRECTIONAL,
+				},
+			},
+		}},
+		QosDecs: map[string]*models.Pcf_SMPolCtrl_QosData{ueQosModTestQosID: {
+			QosId: ueQosModTestQosID, Var5qi: 9,
+			Arp: &models.Arp{
+				PriorityLevel: 8,
+				PreemptCap:    models.PreemptionCapability_NOT_PREEMPT,
+				PreemptVuln:   models.PreemptionVulnerability_NOT_PREEMPTABLE,
+			},
+		}},
+		ChgDecs: map[string]*models.Pcf_SMPolCtrl_ChargingData{ueQosModTestChgID: {
+			ChgId: ueQosModTestChgID, RatingGroup: 2, Offline: true,
+		}},
+	}
 }
 
 func ueQosModTestRequest() *message.PDUSessModReq {

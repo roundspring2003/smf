@@ -59,7 +59,7 @@ type SendPfcpResult struct {
 func (p *Processor) ActivateUPFSession(
 	smContext *smf_context.SMContext,
 	notifyUeHander func(*smf_context.SMContext, bool),
-) {
+) bool {
 	smContext.Log.Traceln("In ActivateUPFSession")
 
 	pfcpPool := make(map[string]*PFCPState)
@@ -129,6 +129,7 @@ func (p *Processor) ActivateUPFSession(
 	if notifyUeHander != nil {
 		notifyUeHander(smContext, success)
 	}
+	return success
 }
 
 // sendInRounds sends the request of each UPF of states with send, in rounds of

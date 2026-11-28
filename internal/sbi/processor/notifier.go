@@ -91,49 +91,76 @@ func (p *Processor) HandleSMPolicyUpdateNotify(
 	logger.PduSessLog.Infoln("In HandleSMPolicyUpdateNotify")
 	decision := request.SmPolicyDecision
 	smContext := smf_context.GetSMContextByRef(smContextRef)
-
-	if smContext == nil {
-		logger.PduSessLog.Errorf("SMContext[%s] not found", smContextRef)
+	if smContext == nil || decision == nil {
 		c.Status(http.StatusBadRequest)
 		return
 	}
-
-	smContext.SMLock.Lock()
+	upi := smf_context.GetUserPlaneInformation()
+	// Serialize modifications until the previous NG-RAN result (or timeout),
+	// without holding either lock while the N2 response handler runs.
+	for {
+		if upi != nil {
+			upi.Mu.RLock()
+		}
+		smContext.SMLock.Lock()
+		pending := smContext.PendingPolicyAllocation
+		if pending == nil {
+			break
+		}
+		smContext.SMLock.Unlock()
+		if upi != nil {
+			upi.Mu.RUnlock()
+		}
+		select {
+		case <-pending.Done:
+		case <-c.Request.Context().Done():
+			return
+		}
+	}
+	if upi != nil {
+		defer upi.Mu.RUnlock()
+	}
 	defer smContext.SMLock.Unlock()
 
-	smContext.CheckState(smf_context.Active)
-	// Wait till the state becomes Active again
-	// TODO: implement waiting in concurrent architecture
-
+	state := smContext.State()
+	if smf_context.GetSMContextByRef(smContextRef) != smContext ||
+		state == smf_context.InActive || state == smf_context.InActivePending || smContext.PFCPReleaseDone {
+		c.Status(http.StatusNotFound)
+		return
+	}
 	smContext.SetState(smf_context.ModificationPending)
+	defer smContext.SetState(smf_context.Active)
+	smContext.PendingPolicyAllocation = preparePolicyAllocation(smContext, decision)
 
-	// Update SessionRule from decision
 	if err := smContext.ApplySessionRules(decision); err != nil {
-		// TODO: Fill the error body
 		smContext.Log.Errorf("SMPolicyUpdateNotify err: %v", err)
+		p.finishPolicyAllocation(smContext, false)
 		c.Status(http.StatusBadRequest)
 		return
 	}
-
-	// TODO: Response data type -
-	// [200 OK] UeCampingRep
-	// [200 OK] array(PartialSuccessReport)
-	// [400 Bad Request] ErrorReport
 	if err := smContext.ApplyPccRules(decision); err != nil {
-		smContext.Log.Errorf("apply sm policy decision error: %+v", err)
-		// TODO: Fill the error body
+		smContext.Log.Errorf("apply sm policy decision error: %v", err)
+		p.finishPolicyAllocation(smContext, true)
 		c.Status(http.StatusBadRequest)
 		return
 	}
 
 	smContext.SendUpPathChgNotification("EARLY", SendUpPathChgEventExposureNotification)
-
-	p.ActivateUPFSession(smContext, nil)
-
+	success := p.ActivateUPFSession(smContext, nil)
+	if !success && smContext.PendingPolicyAllocation != nil {
+		p.finishPolicyAllocation(smContext, true)
+		c.Status(http.StatusNoContent)
+		return
+	}
 	smContext.SendUpPathChgNotification("LATE", SendUpPathChgEventExposureNotification)
-
 	smContext.PostRemoveDataPath()
 
+	if allocation := smContext.PendingPolicyAllocation; allocation != nil {
+		if err := p.requestPolicyAllocation(smContext, allocation); err != nil {
+			smContext.Log.Warnf("Request NG-RAN resources for PCC rules: %v", err)
+			p.finishPolicyAllocation(smContext, true)
+		}
+	}
 	c.Status(http.StatusNoContent)
 }
 

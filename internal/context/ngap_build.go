@@ -288,16 +288,23 @@ func BuildPDUSessionResourceSetupRequestTransfer(ctx *SMContext) ([]byte, error)
 }
 
 func BuildPDUSessionResourceModifyRequestTransfer(ctx *SMContext) ([]byte, error) {
-	qosFlowAddOrModifyRequestList := new(ngapie.QosFlowAddOrModifyRequestList)
-
+	var flows []*QoSFlow
 	for _, qos := range ctx.AdditionalQosFlows {
 		if qos.State == QoSFlowUnset || qos.State == QoSFlowToBeModify {
-			if qosDesc, err := qos.BuildNgapQosFlowAddOrModifyRequestItem(); err != nil {
-				return nil, fmt.Errorf("BuildNgapQosFlowSetupRequestItem failed: %s", err)
-			} else {
-				qosFlowAddOrModifyRequestList.List = append(qosFlowAddOrModifyRequestList.List, qosDesc)
-			}
+			flows = append(flows, qos)
 		}
+	}
+	return BuildPDUSessionResourceModifyRequestForFlows(flows)
+}
+
+func BuildPDUSessionResourceModifyRequestForFlows(flows []*QoSFlow) ([]byte, error) {
+	qosFlowAddOrModifyRequestList := new(ngapie.QosFlowAddOrModifyRequestList)
+	for _, qos := range flows {
+		item, err := qos.BuildNgapQosFlowAddOrModifyRequestItem()
+		if err != nil {
+			return nil, fmt.Errorf("build QoS flow add or modify request item: %w", err)
+		}
+		qosFlowAddOrModifyRequestList.List = append(qosFlowAddOrModifyRequestList.List, item)
 	}
 
 	// TS 38.413 9.3.4.3: the QoS Flow Add or Modify Request List is optional
